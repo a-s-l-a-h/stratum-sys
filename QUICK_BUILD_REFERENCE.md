@@ -106,6 +106,8 @@ python 20_engine_core/build.py --abi arm64-v8a            # add --log for deep t
 # 2. SDK (start restricted; drop --emit-prefix later for the whole SDK)
 python 21_cpp_emit/main.py --input 05_resolve/output_patched
 
+python 21_cpp_emit/package.py  # when this run in output folder in stratum there is folder create stratum inside it all c and cpp code for stratum and cmake also there so you can copy and place in the android studio project and build there .
+
 ---
 
 
