@@ -1,0 +1,5 @@
+{
+  "enabled": true,
+  "closure_mode": "parents_and_interfaces",
+  "targets": []
+}
