@@ -93,10 +93,7 @@ python 05_resolve/main.py --input 05_5_abstract/output/patched --output 05_resol
 new c abi target 
 
 
-# 0. shared Java edits (section 2), then upstream exactly as today:
-python 05_resolve/main.py --input 04_parse/output --output 05_resolve/output
-python 05_5_abstract/main.py --input 05_resolve/output --output 05_5_abstract/output --mode on
-python 05_resolve/main.py --input 05_5_abstract/output/patched --output 05_resolve/output_patched
+
 
 # 1. engine
 python 20_engine_core/emit.py  --input 05_resolve/output_patched
