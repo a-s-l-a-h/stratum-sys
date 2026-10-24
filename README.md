@@ -1,6 +1,13 @@
 
+> This repo in development so This repository is undergoing frequent changes.
 > This repo on based on stratum . but in this repo stratum to focus on c target and cpp target insted of python .
 <div align="center">
+
+
+
+# For python target( nanobind based ) visit this link 
+
+https://github.com/a-s-l-a-h/stratum
 
 # 🌉 Stratum-sys
 
