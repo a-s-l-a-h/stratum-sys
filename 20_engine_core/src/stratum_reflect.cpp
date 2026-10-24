@@ -75,7 +75,8 @@ extern "C" int32_t stratum_reflect_call(const char* class_name, int64_t target, 
                 jobject c = env->GetObjectArrayElement(ctors, i);
                 jobjectArray pts = (jobjectArray)env->CallObjectMethod(c, cPtypes);
                 int s = total(pts);
-                if (s > bestScore) { bestScore = s; best = c; }
+                if (s > bestScore) { if (best) env->DeleteLocalRef(best); bestScore = s; best = c; }
+                else env->DeleteLocalRef(c);
                 env->DeleteLocalRef(pts);
             }
             if (!best) throw std::runtime_error("reflect: no matching constructor");
@@ -86,12 +87,15 @@ extern "C" int32_t stratum_reflect_call(const char* class_name, int64_t target, 
             jobject best = nullptr; int bestScore = -1;
             for (jsize i = 0, n = env->GetArrayLength(ms); i < n; ++i) {
                 jobject m = env->GetObjectArrayElement(ms, i);
-                std::string nm = stratum_jstring_to_str(env, (jstring)env->CallObjectMethod(m, mName));
+                jstring jnm = (jstring)env->CallObjectMethod(m, mName);
+                std::string nm = stratum_jstring_to_str(env, jnm);
+                if (jnm) env->DeleteLocalRef(jnm);
                 bool is_static = (env->CallIntMethod(m, mMods) & 0x8) != 0;
-                if (nm != method || is_static != (target == 0)) continue;
+                if (nm != method || is_static != (target == 0)) { env->DeleteLocalRef(m); continue; }
                 jobjectArray pts = (jobjectArray)env->CallObjectMethod(m, mPtypes);
                 int s = total(pts);
-                if (s > bestScore) { bestScore = s; best = m; }
+                if (s > bestScore) { if (best) env->DeleteLocalRef(best); bestScore = s; best = m; }
+                else env->DeleteLocalRef(m);
                 env->DeleteLocalRef(pts);
             }
             if (!best) throw std::runtime_error(std::string("reflect: no matching ") + (target ? "method " : "static method ") + method);
