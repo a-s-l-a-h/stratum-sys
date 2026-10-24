@@ -22,7 +22,8 @@ https://github.com/a-s-l-a-h/stratum
 ---
 
 ```
-python 00_setup/main.py --ndk-path third_party/ndk25/android-ndk-r25c --jar-path third_party/android-35.jar --api-version 35 --ndk-api 24 --python-target-version "3.14.7" --output 00_setup/output
+python 00_setup/main.py --jar-path third_party/android-35.jar --api-version 35 --output 00_setup/output
+
 ```
 ---
 

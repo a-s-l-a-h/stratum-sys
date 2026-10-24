@@ -6,145 +6,43 @@ import shutil
 import platform
 from pathlib import Path
 from datetime import datetime
-from urllib.request import urlretrieve
+
 # --- Helper Functions ---
 
 def get_executable(base_path, cmd_name):
     """Safely find an executable, fully cross-platform (Windows/Mac/Linux)"""
     is_windows = platform.system() == "Windows"
     exe_name = f"{cmd_name}.exe" if is_windows else cmd_name
-    
+
     if base_path:
         target = Path(base_path) / "bin" / exe_name
         if target.exists():
             return str(target.resolve())
-            
+
     sys_path = shutil.which(cmd_name)
     return str(Path(sys_path).resolve()) if sys_path else None
 
-# --- Verification & Setup Functions ---
+# --- Verification Functions ---
 
 def check_python():
-    """Ensure Python is 3.10+"""
+    """Ensure host Python is 3.10+ (pipeline stages use modern type syntax)"""
     v = sys.version_info
     version_str = f"{v.major}.{v.minor}.{v.micro}"
     if v.major == 3 and v.minor >= 10:
         return True, f"Found v{version_str}"
     return False, f"Found v{version_str}. Require Python 3.10+"
 
-def check_jinja2():
-    """Ensure Jinja2 is installed via pip"""
-    try:
-        import jinja2
-        return True, f"Found v{jinja2.__version__}"
-    except ImportError:
-        return False, "Not installed. Run: pip install jinja2"
-
-def setup_official_python(version):
-    """Download official Python Android release tarballs (python.org/ftp/python) to third_party/cpython_android/."""
-    import tarfile
-
-    project_root = Path(__file__).parent.parent
-    target_dir = project_root / "third_party" / "cpython_android" / version
-    target_dir.mkdir(parents=True, exist_ok=True)
-
-    # Official python.org Android builds target aarch64 (arm64-v8a) and x86_64 (x86_64)
-    triplet_map = {
-        "arm64-v8a": "aarch64-linux-android",
-        "x86_64": "x86_64-linux-android"
-    }
-
-    base_url = f"https://www.python.org/ftp/python/{version}"
-    msgs = []
-    success_count = 0
-
-    for abi, triplet in triplet_map.items():
-        tar_name = f"python-{version}-{triplet}.tar.gz"
-        tar_path = target_dir / tar_name
-        extracted_dir = target_dir / abi
-
-        if extracted_dir.exists() and any(extracted_dir.iterdir()):
-            msgs.append(f"{abi} (cached)")
-            success_count += 1
-            continue
-
-        try:
-            if not tar_path.exists():
-                print(f"   Downloading {tar_name} from python.org...")
-                urlretrieve(f"{base_url}/{tar_name}", tar_path)
-
-            print(f"   Unpacking {tar_name} to {abi}/...")
-            extracted_dir.mkdir(parents=True, exist_ok=True)
-            with tarfile.open(tar_path, "r:gz") as tar:
-                tar.extractall(path=extracted_dir)
-
-            msgs.append(f"{abi} (dl+extracted)")
-            success_count += 1
-        except Exception as e:
-            msgs.append(f"{abi} (failed/404: {e})")
-            if tar_path.exists():
-                tar_path.unlink()
-            if extracted_dir.exists():
-                shutil.rmtree(extracted_dir, ignore_errors=True)
-
-    if success_count > 0:
-        return True, str(target_dir.resolve()), f"Found {success_count}/2 official ABIs: {', '.join(msgs)}"
-    else:
-        return False, None, f"Failed to download ANY official Python architecture for {version} from python.org."
-
-def setup_nanobind(version):
-    """Check for Nanobind in third_party/. If missing, clone specific version WITH SUBMODULES."""
-    project_root = Path(__file__).parent.parent
-    third_party_dir = project_root / "third_party"
-    third_party_dir.mkdir(parents=True, exist_ok=True)
-    
-    nano_dir = third_party_dir / "nanobind"
-    nano_header = nano_dir / "include" / "nanobind" / "nanobind.h"
-    # Check if robin_map exists to verify submodules actually cloned
-    robin_map_header = nano_dir / "ext" / "robin_map" / "include" / "tsl" / "robin_map.h"
-
-    if nano_header.exists() and robin_map_header.exists():
-        return True, str(nano_dir.resolve()), f"Found at {nano_dir} (Submodules OK)"
-
-    print(f"\n---> Nanobind (or its submodules) missing. Cloning {version} recursively...")
-    
-    git_exe = shutil.which("git")
-    if not git_exe:
-        return False, None, "Command 'git' not found on PATH. Please install Git to download nanobind."
-
-    try:
-        if nano_dir.exists():
-            shutil.rmtree(nano_dir)
-            
-        # Clone with --recursive to fetch nanobind's dependencies (like robin_map)
-        # --shallow-submodules keeps the download fast by skipping git history
-        subprocess.run([
-            git_exe, "clone", 
-            "--recursive", 
-            "--shallow-submodules",
-            "--depth", "1", 
-            "--branch", version, 
-            "https://github.com/wjakob/nanobind.git", 
-            str(nano_dir)
-        ], check=True)
-        
-        return True, str(nano_dir.resolve()), f"Successfully cloned {version} with submodules to third_party/nanobind"
-    except subprocess.CalledProcessError as e:
-        return False, None, f"Git clone failed: {e}"
-    except Exception as e:
-        return False, None, f"Error setting up nanobind: {e}"
-
 def check_javap(jdk_path):
     """Find javap and ensure it is version 17+"""
     javap_path = get_executable(jdk_path, "javap")
     if not javap_path:
         return False, None, "Command 'javap' not found. Ensure Java is installed or pass --jdk-path."
-        
+
     try:
         result = subprocess.run([javap_path, "-version"], capture_output=True, text=True, check=True)
         output = result.stdout.strip() or result.stderr.strip()
         version_str = output.split()[1] if len(output.split()) > 1 else output
-        
+
         major_version = int(version_str.split('.')[0])
         if major_version >= 17:
             return True, javap_path, f"Found v{version_str} at {javap_path}"
@@ -152,38 +50,6 @@ def check_javap(jdk_path):
             return False, javap_path, f"Found v{version_str}. Require Java 17+."
     except Exception as e:
         return False, javap_path, f"Failed to execute javap: {e}"
-
-def check_cmake(sdk_path, explicit_cmake_path):
-    """Find CMake and check version 3.15+"""
-    cmake_path = None
-    
-    if explicit_cmake_path:
-        cmake_path = get_executable(explicit_cmake_path, "cmake") or explicit_cmake_path
-    elif sdk_path:
-        cmake_dirs = list((Path(sdk_path) / "cmake").glob("*"))
-        if cmake_dirs:
-            latest_cmake = sorted(cmake_dirs)[-1]
-            cmake_path = get_executable(latest_cmake, "cmake")
-            
-    if not cmake_path:
-        cmake_path = get_executable(None, "cmake")
-        
-    if not cmake_path or not Path(cmake_path).exists():
-        return False, None, "Command 'cmake' not found. Install CMake or pass --cmake-path."
-
-    try:
-        result = subprocess.run([cmake_path, "--version"], capture_output=True, text=True, check=True)
-        version_str = result.stdout.splitlines()[0].split()[2]
-        
-        v_parts = version_str.split('-')[0].split('.')
-        major, minor = int(v_parts[0]), int(v_parts[1])
-        
-        if (major == 3 and minor >= 15) or (major > 3):
-            return True, str(Path(cmake_path).resolve()), f"Found v{version_str} at {cmake_path}"
-        else:
-            return False, cmake_path, f"Found v{version_str}. Require CMake 3.15+."
-    except Exception as e:
-        return False, cmake_path, f"Failed to execute cmake: {e}"
 
 def check_android_jar(sdk_path, explicit_jar_path, api_version):
     """Ensure Android jar exists for the requested API version"""
@@ -199,67 +65,31 @@ def check_android_jar(sdk_path, explicit_jar_path, api_version):
     else:
         return False, None, f"android.jar not found at {jar_path}. Check the path."
 
-def check_ndk_clang(ndk_path):
-    """Find clang++ in NDK (Requires r25+)"""
+def check_ndk_optional(ndk_path):
+    """Optional: only validated if --ndk-path is given. The pipeline itself no longer builds anything."""
     if not ndk_path:
-        return False, None, "NDK path not provided. Must provide --ndk-path."
+        return True, None, "Skipped (not needed: builds are done by Android Studio/Gradle)"
 
     ndk_dir = Path(ndk_path)
     if not ndk_dir.exists():
         return False, None, f"Provided NDK path does not exist: {ndk_path}"
-
-    host_os = platform.system().lower()
-    if host_os == "darwin":
-        host_dir = "darwin-x86_64"
-    elif host_os == "windows":
-        host_dir = "windows-x86_64"
-    else:
-        host_dir = "linux-x86_64"
-
-    clang_path = ndk_dir / "toolchains" / "llvm" / "prebuilt" / host_dir / "bin" / ("clang++.exe" if host_os == "windows" else "clang++")
-    
-    if not clang_path.exists():
-        return False, None, f"clang++ not found at {clang_path}. Is this a valid NDK directory?"
-
-    ndk_props = ndk_dir / "source.properties"
-    is_r25_plus = False
-    rev_str = "Unknown"
-    
-    if ndk_props.exists():
-        with open(ndk_props, 'r') as f:
-            for line in f:
-                if "Pkg.Revision" in line:
-                    rev_str = line.split("=")[1].strip()
-                    try:
-                        major = int(rev_str.split(".")[0])
-                        if major >= 25:
-                            is_r25_plus = True
-                    except ValueError:
-                        pass
-                    break
-
-    if is_r25_plus:
-        return True, str(ndk_dir.resolve()), f"Found clang++ (NDK v{rev_str})"
-    else:
-        return False, str(ndk_dir.resolve()), f"Found NDK v{rev_str}. Require NDK r25 or higher."
+    return True, str(ndk_dir.resolve()), f"Found at {ndk_dir}"
 
 # --- Main Execution ---
 
 def main():
     parser = argparse.ArgumentParser(description="Stratum Stage 00 - Setup and Validation")
     parser.add_argument("--jdk-path", type=str, help="Path to JDK 17+ (Optional if JAVA_HOME/javap is on PATH)")
-    parser.add_argument("--ndk-path", type=str, required=True, help="Path to Android NDK (r25+)")
     parser.add_argument("--sdk-path", type=str, help="Path to full Android SDK (Optional if --jar-path is used)")
     parser.add_argument("--jar-path", type=str, help="Direct path to android.jar (Bypasses --sdk-path)")
-    parser.add_argument("--cmake-path", type=str, help="Direct path to CMake (Optional if cmake is on PATH)")
-    
     parser.add_argument("--api-version", type=str, default="35", help="Target Android API version (Default: 35)")
-    parser.add_argument("--ndk-api", type=str, default="24", help="NDK compile target API = your app minSdkVersion (Default: 24)")
-    parser.add_argument("--nanobind-version", type=str, default="v2.12.0", help="Nanobind release version to clone (Default: v2.12.0)")
-    parser.add_argument("--python-target-version", "--py-version", type=str, default="3.14.7",
-                        help="Official Python version on Android to cache from python.org (Default: 3.14.7)")
-    
+    parser.add_argument("--ndk-path", type=str, help="(Optional) Android NDK path; only validated if given")
     parser.add_argument("--output", type=str, required=True, help="Output directory for setup_report.json")
+
+    # Deprecated flags: still ACCEPTED (and ignored) so old command lines don't break.
+    for old in ("--ndk-api", "--cmake-path", "--nanobind-version", "--python-target-version", "--py-version"):
+        parser.add_argument(old, type=str, default=None, help=argparse.SUPPRESS)
+
     args = parser.parse_args()
 
     print("==================================================")
@@ -268,74 +98,45 @@ def main():
 
     errors = []
 
-    # 1. Python & Core Tools
     py_ok, py_msg = check_python()
     print(f"[{'OK' if py_ok else 'FAIL'}] Python 3.10+   : {py_msg}")
     if not py_ok: errors.append(py_msg)
 
-    jinja_ok, jinja_msg = check_jinja2()
-    print(f"[{'OK' if jinja_ok else 'FAIL'}] Jinja2         : {jinja_msg}")
-    if not jinja_ok: errors.append(jinja_msg)
-
-    nano_ok, nano_path, nano_msg = setup_nanobind(version=args.nanobind_version)
-    print(f"[{'OK' if nano_ok else 'FAIL'}] Nanobind       : {nano_msg}")
-    if not nano_ok: errors.append(nano_msg)
-
-    py_target_ok, py_target_path, py_target_msg = setup_official_python(version=args.python_target_version)
-    print(f"[{'OK' if py_target_ok else 'FAIL'}] Python Android : {py_target_msg}")
-    if not py_target_ok: errors.append(py_target_msg)
-
-    # 2. Java Tools
     javap_ok, javap_path, javap_msg = check_javap(args.jdk_path)
     print(f"[{'OK' if javap_ok else 'FAIL'}] Java (javap)   : {javap_msg}")
     if not javap_ok: errors.append(javap_msg)
-
-    # 3. C++ / Android Build Tools
-    cmake_ok, cmake_path, cmake_msg = check_cmake(args.sdk_path, args.cmake_path)
-    print(f"[{'OK' if cmake_ok else 'FAIL'}] CMake 3.15+    : {cmake_msg}")
-    if not cmake_ok: errors.append(cmake_msg)
 
     jar_ok, jar_path, jar_msg = check_android_jar(args.sdk_path, args.jar_path, args.api_version)
     print(f"[{'OK' if jar_ok else 'FAIL'}] Android API {args.api_version} : {jar_msg}")
     if not jar_ok: errors.append(jar_msg)
 
-    ndk_ok, ndk_resolved_path, ndk_msg = check_ndk_clang(args.ndk_path)
+    ndk_ok, ndk_resolved_path, ndk_msg = check_ndk_optional(args.ndk_path)
     print(f"[{'OK' if ndk_ok else 'FAIL'}] Android NDK    : {ndk_msg}")
     if not ndk_ok: errors.append(ndk_msg)
 
-    # Compile Final Report
-    all_ok = all([py_ok, jinja_ok, nano_ok, py_target_ok, javap_ok, cmake_ok, jar_ok, ndk_ok])
+    all_ok = all([py_ok, javap_ok, jar_ok, ndk_ok])
 
     report = {
         "all_ok": all_ok,
-        "javap_path": javap_path,
+        "javap_path": javap_path,                      # used by Stage 03
         "javap_version": javap_msg if javap_ok else None,
-        "ndk_path": ndk_resolved_path,
+        "jar_path": jar_path,                          # used by Stage 01
         "sdk_path": str(Path(args.sdk_path).resolve()) if args.sdk_path else None,
-        "jar_path": jar_path,
-        "cmake_path": cmake_path,
-        "cmake_version": cmake_msg if cmake_ok else None,
+        "android_api": args.api_version,               # used by Stage 01
         "python_version": py_msg,
-        "jinja2_ok": jinja_ok,
-        "nanobind_present": nano_ok,
-        "nanobind_path": nano_path,
-        "python_target_version": args.python_target_version,
-        "python_target_path": py_target_path,
-        "android_api": args.api_version,
-        "ndk_api": args.ndk_api,
+        "ndk_path": ndk_resolved_path,                 # optional, informational only
         "timestamp": datetime.now().isoformat()
     }
 
-    # Write Output to setup_report.json
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "setup_report.json"
-    
+
     with open(out_file, "w") as f:
         json.dump(report, f, indent=2)
 
     print(f"\n-> Report written to: {out_file}\n")
-    
+
     if not all_ok:
         print("==================================================")
         print(" SETUP FAILED: Please fix the following errors:")

@@ -4,7 +4,8 @@
 ---
 
 ```
-python 00_setup/main.py --ndk-path third_party/ndk25/android-ndk-r25c --jar-path third_party/android-35.jar --api-version 35 --ndk-api 24 --python-target-version "3.14.7" --output 00_setup/output
+python 00_setup/main.py --jar-path third_party/android-35.jar --api-version 35 --output 00_setup/output
+
 ```
 ---
 
@@ -108,20 +109,3 @@ python 21_cpp_emit/package.py  # when this run in output folder in stratum there
 ---
 
 
-
----
-# stratum embed fully to single .so file it's depending py files all inside to single .so 
-
-### this need same as 00 to 05_5 then 08  ,, and below 10 (10 emit , 10 build) choose static maybe see some perfomance improvment , and also choose --no-log in build when production time
-
-```
-python 08_pyi_emit/main.py --input 05_resolve/output_patched --output 08_pyi_emit/output --mode static 
-
-```
-```
-python 10_embed/emit.py --input 05_resolve/output_patched --static-py 08_pyi_emit/output --setup 00_setup/output/setup_report.json --output 10_embed/output --mode static 
-```
-```
-python 10_embed/build.py --core 10_embed/output/core --setup 00_setup/output/setup_report.json --nanobind third_party/nanobind --abi arm64-v8a --output 10_embed/output --no-log
-``` 
----
