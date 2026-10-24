@@ -16,6 +16,8 @@
 
 namespace stratum {
 
+template <class T> struct dependent_false : std::false_type {};
+
 struct JavaException : std::runtime_error { using std::runtime_error::runtime_error; };
 inline void check(int32_t err) { if (err) throw JavaException(stratum_last_error()); }
 inline std::string to_std(const StratumStr& s) { return s.ptr ? std::string(s.ptr, s.len) : std::string(); }
@@ -43,11 +45,17 @@ public:
     int32_t hash_code() const noexcept { return stratum_hash_code(ptr_); }
     template <class T> bool is_instance_of() const noexcept { return stratum_is_instance_of(ptr_, T::_CLASS_ID) != 0; }
     template <class T> T as() const {            // checked downcast (JNI IsInstanceOf)
-        if (!ptr_) return T();
-        if (!is_instance_of<T>()) throw std::runtime_error(std::string("Stratum: object is not an instance of ") + T::_FQN);
-        return T::_wrap(stratum_clone_ref(ptr_));
+        if constexpr (std::is_same_v<T, Object>) { return *this; }
+        else {
+            if (!ptr_) return T();
+            if (!is_instance_of<T>()) throw std::runtime_error(std::string("Stratum: object is not an instance of ") + T::_FQN);
+            return T::_wrap(stratum_clone_ref(ptr_));
+        }
     }
-    template <class T> T unchecked_as() const { return ptr_ ? T::_wrap(stratum_clone_ref(ptr_)) : T(); }
+    template <class T> T unchecked_as() const {
+        if constexpr (std::is_same_v<T, Object>) { return *this; }
+        else { return ptr_ ? T::_wrap(stratum_clone_ref(ptr_)) : T(); }
+    }
 
     // Boxed primitive unbox helpers
     bool     as_bool() const   { int32_t e=0; auto r = stratum_unbox(ptr_, 'Z', &e); check(e); return r != 0; }
@@ -82,6 +90,103 @@ inline Object new_map(const std::vector<std::pair<Object, Object>>& v) {
     std::vector<int64_t> k, x; for (auto& p : v) { k.push_back(p.first.raw()); x.push_back(p.second.raw()); }
     return Object::adopt(stratum_new_map(k.data(), x.data(), k.size()));
 }
+
+// ── Java array creation ─────────────────────────────────────────────────────
+// elem_class: "java/lang/String", "android.view.Surface", or an array descriptor ("[I" => int[][], "[[I" => int[][][]).
+inline Object new_object_array(std::string_view elem_class, const std::vector<Object>& items) {
+    std::string e(elem_class);
+    std::vector<int64_t> h; h.reserve(items.size());
+    for (auto& o : items) h.push_back(o.raw());
+    int64_t r = stratum_new_object_array(e.c_str(), h.data(), h.size());
+    if (!r) throw JavaException(stratum_last_error());
+    return Object::adopt(r);
+}
+
+namespace arr_detail {
+template <class T> struct is_container : std::false_type {};
+template <class T, class A> struct is_container<std::vector<T, A>> : std::true_type {};
+template <class T> struct is_container<std::initializer_list<T>> : std::true_type {};
+template <class T> struct depth { static constexpr size_t value = 0; };
+template <class T, class A> struct depth<std::vector<T, A>> { static constexpr size_t value = 1 + depth<T>::value; };
+template <class T> struct depth<std::initializer_list<T>> { static constexpr size_t value = 1 + depth<T>::value; };
+template <class T> struct leaf { using type = T; };
+template <class T, class A> struct leaf<std::vector<T, A>> { using type = typename leaf<T>::type; };
+template <class T> struct leaf<std::initializer_list<T>> { using type = typename leaf<T>::type; };
+
+template <class T> inline constexpr bool is_str_v = std::is_convertible_v<const T&, std::string_view>;
+template <class T> inline constexpr bool is_obj_v = std::is_base_of_v<Object, T>;
+
+// C++ element type -> Java primitive kind. sizeof-based, so int / long long / int64_t all behave on 32- and 64-bit.
+template <class T> constexpr char prim_kind() {
+    using D = std::remove_cv_t<T>;
+    if constexpr (std::is_same_v<D, bool>) return 'Z';
+    else if constexpr (std::is_integral_v<D>) {
+        if constexpr (sizeof(D) == 1) return 'B';
+        else if constexpr (sizeof(D) == 2) return std::is_unsigned_v<D> ? 'C' : 'S';
+        else if constexpr (sizeof(D) == 4) return 'I';
+        else if constexpr (sizeof(D) == 8) return 'J';
+        else { static_assert(dependent_false<D>::value, "new_array: unsupported integer size"); return 0; }
+    }
+    else if constexpr (std::is_same_v<D, float>) return 'F';
+    else if constexpr (std::is_same_v<D, double>) return 'D';
+    else { static_assert(dependent_false<D>::value, "new_array: unsupported element type"); return 0; }
+}
+template <class L> std::string leaf_name() {
+    if constexpr (is_str_v<L>) return "java/lang/String";
+    else if constexpr (std::is_same_v<L, Object>) return "java/lang/Object";
+    else if constexpr (is_obj_v<L>) return L::_FQN;
+    else return std::string(1, prim_kind<L>());
+}
+// Element class of a `dims`-dimensional array whose innermost element type is L.
+template <class L> std::string elem_class(size_t dims) {
+    if (dims <= 1) return leaf_name<L>();
+    constexpr bool ref = is_str_v<L> || is_obj_v<L>;
+    return std::string(dims - 1, '[') + (ref ? "L" + leaf_name<L>() + ";" : leaf_name<L>());
+}
+template <class S> Object to_jstr(const S& s) {
+    if constexpr (std::is_pointer_v<S>) return s ? java_string(std::string_view(s)) : Object();
+    else return java_string(std::string_view(s));
+}
+
+template <class C> Object build(const C& c) {           // C = std::vector<E> or std::initializer_list<E>
+    using E = typename C::value_type;
+    if constexpr (is_container<E>::value) {
+        using L = typename leaf<E>::type;
+        std::vector<Object> rows; rows.reserve(c.size());
+        for (const auto& item : c) rows.push_back(build(item));
+        return new_object_array(elem_class<L>(1 + depth<E>::value), rows);
+    } else if constexpr (is_str_v<E>) {
+        std::vector<Object> o; o.reserve(c.size());
+        for (const auto& s : c) o.push_back(to_jstr(s));
+        return new_object_array("java/lang/String", o);
+    } else if constexpr (is_obj_v<E>) {
+        std::vector<Object> o(c.begin(), c.end());
+        return new_object_array(leaf_name<E>(), o);
+    } else if constexpr (std::is_same_v<E, bool>) {
+        std::vector<uint8_t> t(c.begin(), c.end());
+        int64_t h = stratum_new_array('Z', t.data(), t.size());
+        if (!h) throw JavaException(stratum_last_error());
+        return Object::adopt(h);
+    } else {
+        int64_t h = stratum_new_array((uint8_t)prim_kind<E>(), std::data(c), std::size(c));
+        if (!h) throw JavaException(stratum_last_error());
+        return Object::adopt(h);
+    }
+}
+} // namespace arr_detail
+
+// One name for everything: new_array(...) -> Java array Object of the right type.
+template <class T> Object new_array(const T* p, size_t n) {
+    int64_t h = stratum_new_array((uint8_t)arr_detail::prim_kind<T>(), p, n);
+    if (!h) throw JavaException(stratum_last_error());
+    return Object::adopt(h);
+}
+template <class T> Object new_array(const std::vector<T>& v) { return arr_detail::build(v); }            // any depth
+template <class T> Object new_array(std::initializer_list<T> l) { return arr_detail::build(l); }          // {1,2,3}
+template <class T> Object new_array(std::initializer_list<std::initializer_list<T>> l) { return arr_detail::build(l); }   // {{1,2},{3,4}}
+template <class T> Object new_array(std::initializer_list<std::initializer_list<std::initializer_list<T>>> l) { return arr_detail::build(l); }
+template <class T> Object new_array(std::initializer_list<std::initializer_list<std::initializer_list<std::initializer_list<T>>>> l) { return arr_detail::build(l); }
+inline Object new_string_array(const std::vector<std::string>& v) { return arr_detail::build(v); }
 
 // ── argument converters ──
 template <class T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
@@ -255,7 +360,6 @@ public:
 inline std::string& ret_buf() { static thread_local std::string s; return s; }
 inline std::vector<int32_t>& ret_ints() { static thread_local std::vector<int32_t> v; return v; }
 inline void set_err(StratumVal* o, const char* m) { ret_buf() = m; o->tag = STRATUM_V_ERR; o->v.s.ptr = ret_buf().data(); o->v.s.len = ret_buf().size(); }
-template <class T> struct dependent_false : std::false_type {};
 
 template <class R> void set_ret(StratumVal* out, R&& r) {
     using D = std::decay_t<R>;

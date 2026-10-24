@@ -90,6 +90,15 @@ STRATUM_API int64_t     stratum_box(uint8_t kind, int64_t bits);      /* kind Z 
 STRATUM_API int64_t     stratum_unbox(int64_t obj_handle, uint8_t kind, int32_t* err);
 STRATUM_API int64_t     stratum_new_list(const int64_t* items, size_t n);
 STRATUM_API int64_t     stratum_new_map(const int64_t* keys, const int64_t* vals, size_t n);
+/* Primitive array kinds for stratum_new_array (no need to remember letters). */
+enum { STRATUM_K_BYTE='B', STRATUM_K_SHORT='S', STRATUM_K_CHAR='C', STRATUM_K_INT='I',
+       STRATUM_K_LONG='J', STRATUM_K_FLOAT='F', STRATUM_K_DOUBLE='D', STRATUM_K_BOOL='Z' };
+/* 1-D primitive Java array copied from data[len]. Returns a new global ref, 0 on error (stratum_last_error). */
+STRATUM_API int64_t     stratum_new_array(uint8_t kind, const void* data, size_t len);
+/* Object array. elem_class is a class name ("java/lang/String", "android.view.Surface") or an
+   ARRAY DESCRIPTOR for multi-dim: "[I" gives int[][], "[[I" gives int[][][], "[Landroid/view/Surface;" gives Surface[][].
+   items may contain 0 (null). Wrong element types fail with a readable ArrayStoreException error. */
+STRATUM_API int64_t     stratum_new_object_array(const char* elem_class, const int64_t* items, size_t n);
 STRATUM_API void        stratum_get_map_entries(int64_t map_handle, StratumArr* keys_out, StratumArr* vals_out, int32_t* err);
 
 STRATUM_API void        stratum_register_callback(const char* key, const StratumCbDesc* d);  /* e.g. "StratumService#onCreate", "app#fn" */

@@ -55,10 +55,10 @@ def param_spec(p, tag, i, wrap_bool):
         return P(PRIM[tag], None, f"::stratum::to_arg({n})", PRIM[tag])
     if tag == "s": return P("::stratum::JStr", None, f"{n}.arg()", "JStr")
     if tag in ARR_T: t = ARR_T[tag]; return P(f"::stratum::Arr<{t}>", None, f"{n}.arg()", f"Arr<{t}>")
-    if tag == "T": return P("::stratum::StrArr", None, f"{n}.arg()", "StrArr")
-    if tag == "A": return P("::stratum::ObjArr", None, f"{n}.arg()", "ObjArr")
-    if tag == "M": return P("::stratum::ListArg", None, f"{n}.arg()", "ListArg")
-    if tag == "N": return P("::stratum::MapArg", None, f"{n}.arg()", "MapArg")
+    if tag == "T": return P("const ::stratum::StrArr&", None, f"{n}.arg()", "StrArr")
+    if tag == "A": return P("const ::stratum::ObjArr&", None, f"{n}.arg()", "ObjArr")
+    if tag == "M": return P("const ::stratum::ListArg&", None, f"{n}.arg()", "ListArg")
+    if tag == "N": return P("const ::stratum::MapArg&", None, f"{n}.arg()", "MapArg")
     if tag in ("a", "p"):
         return P(f"C{i}&&", f"auto h{i} = ::stratum::make_callback(std::forward<C{i}>({n}));", f"h{i}.arg()", "CB", True)
     if tag == "L" and p.get("is_boxed") and p.get("jni_class") in BOXED:

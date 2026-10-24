@@ -56,6 +56,20 @@ static void resolve_class(JNIEnv* env, uint32_t cid) {
         if (s->len) env->SETF(arr, 0, (jsize)s->len, (const CT*)s->ptr);                     \
         jv[i].l = arr; break; }
 
+// Descriptor of parameter `idx` inside "(...)R": "I", "Landroid/view/Surface;", "[[I", ...
+static std::string param_desc(const char* sig, int idx) {
+    if (!sig || *sig != '(') return "";
+    const char* p = sig + 1;
+    for (int k = 0; *p && *p != ')'; ++k) {
+        const char* s = p;
+        while (*p == '[') ++p;
+        if (*p == 'L') { while (*p && *p != ';') ++p; }
+        if (*p) ++p;
+        if (k == idx) return std::string(s, (size_t)(p - s));
+    }
+    return "";
+}
+
 static void pack(JNIEnv* env, const char* tags, const MethodMeta& mm, const StratumArg* args, jvalue* jv) {
     for (uint8_t i = 0; i < mm.param_count; ++i) {
         switch (tags[i]) {
@@ -95,11 +109,29 @@ static void pack(JNIEnv* env, const char* tags, const MethodMeta& mm, const Stra
             }
             case 'A': {
                 const StratumSlice* s = (const StratumSlice*)args[i].p;
-                if (!s) { jv[i].l = nullptr; break; }
-                jobjectArray arr = env->NewObjectArray((jsize)s->len, g_object_class, nullptr);
+                if (!s || (!s->ptr && s->len)) { jv[i].l = nullptr; break; }
+                // Element class comes from the real method descriptor: "[Lx/Y;" -> x/Y, "[[I" -> "[I" (int[])
+                jclass ec = g_object_class, local = nullptr;
+                std::string d = param_desc(get_str(mm.sig_offset), (int)i);
+                if (d.size() > 1 && d[0] == '[') {
+                    std::string e = d.substr(1);
+                    if (e.size() >= 2 && e.front() == 'L' && e.back() == ';') e = e.substr(1, e.size() - 2);
+                    else if (e.empty() || e.front() != '[') e.clear();       // primitive/malformed: keep Object[]
+                    if (!e.empty() && e != "java/lang/Object") {            // Object[] needs no lookup
+                        local = find_class(env, e.c_str());
+                        if (local) ec = local;                              // unknown class: old behaviour
+                    }
+                }
+                jobjectArray arr = env->NewObjectArray((jsize)s->len, ec, nullptr);
+                if (local) env->DeleteLocalRef(local);
+                if (!arr) { stratum_check_java_exc(env); throw std::runtime_error("Stratum: OOM allocating array"); }
                 const int64_t* items = (const int64_t*)s->ptr;
-                for (size_t k = 0; k < s->len; ++k)
-                    if (items[k]) env->SetObjectArrayElement(arr, (jsize)k, (jobject)(uintptr_t)items[k]);
+                for (size_t k = 0; k < s->len; ++k) {
+                    if (items && items[k]) {
+                        env->SetObjectArrayElement(arr, (jsize)k, (jobject)(uintptr_t)items[k]);
+                        stratum_check_java_exc(env);                        // wrong element type -> clear error
+                    }
+                }
                 jv[i].l = arr; break;
             }
             case 'M': {
@@ -457,6 +489,57 @@ int64_t stratum_box(uint8_t kind, int64_t bits) {
     }
     return 0;
 }
+int64_t stratum_new_array(uint8_t kind, const void* data, size_t len) {
+    return guarded<int64_t>(nullptr, 0, [&]() -> int64_t {
+        JNIEnv* env = get_env(); if (!env) return 0;
+        if (len > 0x7fffffffu) throw std::runtime_error("Stratum: array too large");
+        if (len && !data) throw std::runtime_error("Stratum: null data for non-empty array");
+        JniLocalFrame fr(env, 8);
+        const jsize n = (jsize)len;
+        jarray arr = nullptr;
+#define MK_ARR(K, JT, NEWF, SETF, CT) \
+        case K: { JT a = env->NEWF(n); if (a && n) env->SETF(a, 0, n, (const CT*)data); arr = a; break; }
+        switch (kind) {
+            MK_ARR('B', jbyteArray,    NewByteArray,    SetByteArrayRegion,    jbyte)
+            MK_ARR('I', jintArray,     NewIntArray,     SetIntArrayRegion,     jint)
+            MK_ARR('J', jlongArray,    NewLongArray,    SetLongArrayRegion,    jlong)
+            MK_ARR('F', jfloatArray,   NewFloatArray,   SetFloatArrayRegion,   jfloat)
+            MK_ARR('D', jdoubleArray,  NewDoubleArray,  SetDoubleArrayRegion,  jdouble)
+            MK_ARR('Z', jbooleanArray, NewBooleanArray, SetBooleanArrayRegion, jboolean)
+            MK_ARR('C', jcharArray,    NewCharArray,    SetCharArrayRegion,    jchar)
+            MK_ARR('S', jshortArray,   NewShortArray,   SetShortArrayRegion,   jshort)
+            default: throw std::runtime_error("Stratum: unsupported array kind");
+        }
+#undef MK_ARR
+        if (!arr) { stratum_check_java_exc(env); throw std::runtime_error("Stratum: OOM allocating array"); }
+        return (int64_t)(uintptr_t)env->NewGlobalRef(arr);
+    });
+}
+
+int64_t stratum_new_object_array(const char* elem_class, const int64_t* items, size_t n) {
+    return guarded<int64_t>(nullptr, 0, [&]() -> int64_t {
+        JNIEnv* env = get_env(); if (!env) return 0;
+        if (!elem_class || !*elem_class) throw std::runtime_error("Stratum: new_object_array: empty element class");
+        if (n > 0x7fffffffu) throw std::runtime_error("Stratum: array too large");
+        if (n && !items) throw std::runtime_error("Stratum: null items for non-empty array");
+        JniLocalFrame fr(env, 16);
+        std::string e = elem_class;
+        for (char& c : e) if (c == '.') c = '/';
+        jclass ec = find_class(env, e.c_str());            // also accepts "[I", "[[Lx/Y;"
+        if (!ec) throw std::runtime_error(std::string("Stratum: array element class not found: ") + elem_class);
+        jobjectArray arr = env->NewObjectArray((jsize)n, ec, nullptr);
+        env->DeleteLocalRef(ec);
+        if (!arr) { stratum_check_java_exc(env); throw std::runtime_error("Stratum: OOM allocating array"); }
+        for (size_t k = 0; k < n; ++k) {
+            if (items[k]) {
+                env->SetObjectArrayElement(arr, (jsize)k, (jobject)(uintptr_t)items[k]);
+                stratum_check_java_exc(env);               // ArrayStoreException -> readable error
+            }
+        }
+        return (int64_t)(uintptr_t)env->NewGlobalRef(arr);
+    });
+}
+
 int64_t stratum_new_list(const int64_t* items, size_t n) {
     return guarded<int64_t>(nullptr, 0, [&]() -> int64_t {
         JNIEnv* env = get_env(); if (!env) return 0; JniLocalFrame fr(env, 32);

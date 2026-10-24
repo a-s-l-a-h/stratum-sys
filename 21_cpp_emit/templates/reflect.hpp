@@ -4,9 +4,17 @@
 
 namespace stratum::reflect {
 namespace detail {
+template <class D> struct is_vec : std::false_type {};
+template <class E, class A> struct is_vec<std::vector<E, A>> : std::true_type {};
+
 struct Pack {
     std::vector<StratumVal> v;
+    std::vector<Object> keep;                    // owns temporary arrays until the reflect call returns
     template <class T> void push(const T& x) {
+        if constexpr (is_vec<std::decay_t<T>>::value) { keep.push_back(::stratum::new_array(x)); push_one(keep.back()); }
+        else push_one(x);
+    }
+    template <class T> void push_one(const T& x) {
         StratumVal s; std::memset(&s, 0, sizeof(s));
         using D = std::decay_t<T>;
         if constexpr (std::is_same_v<D, bool>) { s.tag = STRATUM_V_BOOL; s.v.i = x; }
