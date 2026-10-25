@@ -3,25 +3,47 @@
 
 ## Overview & Architectural Context
 
-Stage 03 executes the Java Class File Disassembler (`javap`) against every class selected in **Stage 02**. This step extracts internal JNI type signatures for all constructors, methods, and fields.
+Stage 03 executes the Java Class File Disassembler (`javap`) against every class selected in **Stage 02**. This step extracts internal JNI type signatures and constant values for all constructors, methods, and fields.
 
-In the Stratum architecture:
+### In the Stratum Architecture:
 - Android runtime reflection in C++ (`GetMethodID`, `GetStaticMethodID`, `GetFieldID`, `NewObjectA`) requires exact JVM bytecode signatures (e.g., `(ILjava/lang/String;)V`).
 - Stage 03 runs `javap` with:
   - `-s`: Exposes internal JNI type descriptors.
   - `-p`: Exposes all members (public, protected, package-private, and private).
+  - `-constants`: Exposes static final constant values.
 - The raw output files (`.javap`) preserve parameter types, exception throws, and constant field values, providing the complete raw syntax necessary for Stage 04's AST parser.
+- **Cross-Platform & Flexible Resolution**: Supports arbitrary relative or absolute paths, handles spaces wrapped in quotes `""`, and accepts either direct JSON files or their parent directories for `--setup` and `--targets`.
 
 ---
 
 ## Quick Start / CLI Demo
 
+### Recommended Pipeline Execution (Matching Build Layout)
 ```bash
 python 03_javap/main.py \
-    --input "01_extract/output/" \
+    --input "build/API_35/01_extract" \
     --targets "02_inspect/targets.json" \
-    --setup "00_setup/output/setup_report.json" \
-    --output "03_javap/output/"
+    --setup "build/API_35/00_setup" \
+    --output "build/API_35/03_javap"
+```
+
+### Passing Folder Paths for Configs (Directory Fallback)
+```bash
+# Both --targets and --setup accept either the folder or the .json file directly
+python 03_javap/main.py \
+    --input "build/API_35/01_extract" \
+    --targets "02_inspect" \
+    --setup "build/API_35/00_setup" \
+    --output "build/API_35/03_javap"
+```
+
+### Windows PowerShell (With Spaces in Paths)
+```powershell
+python 03_javap/main.py `
+    --input "D:/My Project/build/API_35/01_extract" `
+    --targets "02_inspect/targets.json" `
+    --setup "D:/My Project/build/API_35/00_setup" `
+    --output "D:/My Project/build/API_35/03_javap"
 ```
 
 ---
@@ -30,36 +52,42 @@ python 03_javap/main.py \
 
 | Flag | Type | Required | Description |
 |---|---|:---:|---|
-| `--input` | `Path` | **Yes** | Path to Stage 01 output (`01_extract/output/`). Serves as the `-classpath` for `javap`. |
-| `--targets` | `Path` | **Yes** | Path to `02_inspect/targets.json`. Determines execution mode (`full` vs `manual`). |
-| `--setup` | `Path` | **Yes** | Path to `00_setup/output/setup_report.json`. Locates the verified JDK `javap` binary. |
-| `--output` | `Path` | **Yes** | Destination directory where individual `.javap` output files and `javap_summary.json` are written. |
+| `--input` | `Path` | **Yes** | Path to extracted `.class` files directory from Stage 01 (e.g., `"build/API_35/01_extract"`). Serves as the `-classpath` for `javap`. |
+| `--targets` | `Path` | **Yes** | Path to `targets.json` **OR** its parent folder (e.g., `"02_inspect"`). Determines execution mode (`full` vs `manual`). |
+| `--setup` | `Path` | **Yes** | Path to `setup_report.json` **OR** its parent folder (e.g., `"build/API_35/00_setup"`). Provides the verified JDK `javap` binary path. |
+| `--output` | `Path` | **Yes** | Destination directory where individual `.javap` output files and `javap_summary.json` will be written. |
 
 ---
 
 ## Execution Workflow
 
-1. **Environment & Tool Resolution**: Reads `setup_report.json` to obtain the verified JDK path for `javap`. If not configured, defaults to system `javap`.
-2. **Target Filtering**:
-   - If `targets.json` specifies `"mode": "full"`, scans `--input` and builds a complete list of all `.class` files.
-   - If `targets.json` specifies `"mode": "manual"`, filters the `targets` array for entries where `"enabled": true`.
-3. **Disassembly Subprocess Execution**:
+1. **Path Normalization & Input Validation**:
+   - Strips whitespace and outer quotes from all path arguments.
+   - Resolves all paths to canonical absolute filesystem paths (`Path.resolve()`).
+   - If `--setup` or `--targets` points to a directory, it automatically resolves to `setup_report.json` or `targets.json`.
+   - Validates that `--input` directory, `targets.json`, and `setup_report.json` exist on disk.
+2. **Environment & Tool Resolution**:
+   - Reads `setup_report.json` using UTF-8 to obtain the verified JDK path for `javap`. If not configured, defaults to system `javap`.
+3. **Target Filtering**:
+   - Reads `targets.json` using UTF-8.
+   - If `mode == "full"`: Scans `--input` recursively for all `.class` files (e.g., 5,981 classes in Android API 35) and alphabetizes them.
+   - If `mode == "manual"`: Filters `targets` for classes where `"enabled": true`.
+4. **Disassembly Subprocess Execution**:
    - For each target class, runs:
      ```bash
-     javap -s -p -classpath <input_dir> <fqn>
+     javap -s -p -constants -classpath <input_dir> <fqn>
      ```
-   - Enforces a 30-second timeout per class to prevent hanging on corrupt bytecode.
-4. **File Mirroring**:
-   - Outputs each disassembled class result to `--output/<package_path>/<ClassName>.javap`.
-5. **Report Generation**:
-   - Compiles metrics into `javap_summary.json` detailing successful extractions and recording any failed FQNs with stderr logs.
+   - Sets a 30-second timeout per class to prevent hanging on corrupted bytecode.
+5. **File Mirroring & Summary Report**:
+   - Writes each disassembled class to `--output/<package_path>/<ClassName>.javap` with UTF-8 encoding.
+   - Writes operational metrics to `javap_summary.json` detailing successful extractions and any failed classes with stderr output.
 
 ---
 
 ## Output Structure
 
 ```text
-03_javap/output/
+build/API_35/03_javap/
 ├── javap_summary.json
 └── android/
     ├── app/
@@ -98,15 +126,15 @@ public class android.widget.Button extends android.widget.TextView {
 
 ```json
 {
-  "mode": "manual",
-  "total_processed": 18,
-  "successful": 18,
+  "mode": "full",
+  "total_processed": 5981,
+  "successful": 5981,
   "failed": 0,
   "failed_classes": []
 }
 ```
 
-### Failed Class Format (if errors occur)
+### Failed Class Format (if any errors occur)
 
 ```json
 {
@@ -129,6 +157,7 @@ public class android.widget.Button extends android.widget.TextView {
 
 | Exit Code | Reason | Resolution |
 |:---:|---|---|
-| `0` | All target classes disassembled successfully (or non-fatal class errors logged). | Inspect summary and proceed to **Stage 04 (`04_parse`)**. |
+| `0` | All target classes disassembled successfully (or non-fatal class errors logged). | Proceed to **Stage 04 (`04_parse`)**. |
 | `1` | Missing inputs (`--input`, `--targets`, or `--setup` does not exist). | Ensure Stages 00, 01, and 02 have been executed. |
+| `1` | `javap` binary executable not found or invalid. | Verify `javap_path` in `setup_report.json` or ensure Java is on `PATH`. |
 | `1` | No classes to process. | Ensure `targets.json` has at least one class with `"enabled": true` or set `"mode": "full"`. |

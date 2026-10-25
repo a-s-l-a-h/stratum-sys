@@ -59,31 +59,40 @@ def main():
 
     print_header("STRATUM PIPELINE - STAGE 03 (JAVAP)")
 
-    # ── Resolve paths ──────────────────────────────────────────────────────────
-    input_dir   = Path(args.input)
-    targets_file = Path(args.targets)
-    setup_file  = Path(args.setup)
-    output_dir  = Path(args.output)
+    # ── Resolve paths (cross-platform & quote-safe) ───────────────────────────
+    input_dir = Path(str(args.input).strip(' "\'')).resolve()
+    
+    targets_path = Path(str(args.targets).strip(' "\'')).resolve()
+    targets_file = targets_path / "targets.json" if targets_path.is_dir() else targets_path
+
+    setup_path = Path(str(args.setup).strip(' "\'')).resolve()
+    setup_file = setup_path / "setup_report.json" if setup_path.is_dir() else setup_path
+
+    output_dir = Path(str(args.output).strip(' "\'')).resolve()
 
     # ── Validate inputs ────────────────────────────────────────────────────────
-    for p, label in [
-        (input_dir,    "01_extract/output/"),
-        (targets_file, "targets.json"),
-        (setup_file,   "setup_report.json"),
-    ]:
-        if not p.exists():
-            print(f"ERROR: Not found: {p}  ({label})")
-            sys.exit(1)
+    if not input_dir.is_dir():
+        print(f"ERROR: Input directory not found: {input_dir}")
+        sys.exit(1)
+
+    if not targets_file.is_file():
+        print(f"ERROR: targets.json not found: {targets_file}")
+        sys.exit(1)
+
+    if not setup_file.is_file():
+        print(f"ERROR: setup_report.json not found: {setup_file}")
+        sys.exit(1)
 
     # ── Read setup report (get javap path) ─────────────────────────────────────
-    with open(setup_file, "r") as f:
+    with open(setup_file, "r", encoding="utf-8") as f:
         setup = json.load(f)
 
-    javap_path = setup.get("javap_path", "javap")   # fallback to system javap
+    raw_javap = setup.get("javap_path", "javap")
+    javap_path = str(Path(raw_javap).resolve()) if raw_javap and Path(raw_javap).is_file() else raw_javap
     print(f"-> javap path : {javap_path}")
 
     # ── Read targets.json ──────────────────────────────────────────────────────
-    with open(targets_file, "r") as f:
+    with open(targets_file, "r", encoding="utf-8") as f:
         targets_data = json.load(f)
 
     mode    = targets_data.get("mode", "manual")
@@ -145,7 +154,7 @@ def main():
         "failed_classes":  failed,
     }
     summary_file = output_dir / "javap_summary.json"
-    with open(summary_file, "w") as f:
+    with open(summary_file, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     # ── Final report ───────────────────────────────────────────────────────────
