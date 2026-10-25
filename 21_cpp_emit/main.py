@@ -9,7 +9,7 @@ import argparse, hashlib, json, re, shutil
 from collections import defaultdict
 from pathlib import Path
 
-HERE = Path(__file__).parent
+HERE = Path(__file__).resolve().parent
 ENGINE_INC = HERE.parent / "20_engine_core" / "include"
 SKIP = {"parse_summary.json", "resolve_summary.json", "manifest.json", "sanitize_summary.json"}
 CPP_KW = set("""alignas alignof and and_eq asm auto bitand bitor bool break case catch char char8_t char16_t char32_t class compl
@@ -272,10 +272,12 @@ def emit_class(allc, data, names):
 def main():
     ap = argparse.ArgumentParser(description="Stratum Stage 21 - C++ SDK emitter")
     ap.add_argument("--input", required=True, help="05_resolve/output_patched/")
-    ap.add_argument("--output", default="21_cpp_emit/output")
+    ap.add_argument("--output", default=None,
+                    help="Output dir (any location). Default: <this folder>/output")
     ap.add_argument("--emit-prefix", default="", help="comma-separated FQN prefixes (empty = everything; large). android.app.Activity is always emitted.")
     a = ap.parse_args()
-    inp, out = Path(a.input), Path(a.output)
+    inp = Path(str(a.input).strip(' "\'')).resolve()
+    out = Path(str(a.output).strip(' "\'')).resolve() if a.output else HERE / "output"
     inc = out / "include"; sd = inc / "stratum"
     if sd.exists(): shutil.rmtree(sd)
     sd.mkdir(parents=True)

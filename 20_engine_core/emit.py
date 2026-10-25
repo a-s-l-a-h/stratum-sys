@@ -69,9 +69,13 @@ def emit_metadata_table(classes, pool):
 def main():
     ap = argparse.ArgumentParser(description="Stratum Stage 20 - metadata emit")
     ap.add_argument("--input", required=True, help="05_resolve/output_patched/")
-    ap.add_argument("--output", default="20_engine_core/generated")
+    ap.add_argument("--output", default=None,
+                    help="Output dir (any location). Default: <this folder>/generated")
     a = ap.parse_args()
-    inp, out = Path(a.input), Path(a.output); out.mkdir(parents=True, exist_ok=True)
+    inp = Path(str(a.input).strip(' "\'')).resolve()
+    out = (Path(str(a.output).strip(' "\'')).resolve() if a.output
+           else Path(__file__).resolve().parent / "generated")
+    out.mkdir(parents=True, exist_ok=True)
     classes = []
     for jf in sorted(inp.rglob("*.json")):
         if jf.name in SKIP: continue

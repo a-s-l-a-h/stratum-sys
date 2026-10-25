@@ -369,14 +369,14 @@ def main():
     args = ap.parse_args()
 
     print_header("STRATUM PIPELINE — STAGE 05 (RESOLVE & INDEX) v9")
-    input_dir = Path(args.input)
-    output_dir = Path(args.output)
+    input_dir = Path(str(args.input).strip(' "\'')).resolve()
+    output_dir = Path(str(args.output).strip(' "\'')).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     registry = load_registry(input_dir)
     print(f"-> Loaded {len(registry):,} class files.")
 
-    targets_file = Path("05_resolve/targets.json")
+    targets_file = Path(__file__).resolve().parent / "targets.json"
     filter_enabled, seed_fqns, closure_mode = False, [], (args.closure_mode or "parents_only")
 
     if targets_file.exists():

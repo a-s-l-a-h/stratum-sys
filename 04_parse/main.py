@@ -785,8 +785,8 @@ def main():
 
     print_header("STRATUM PIPELINE - STAGE 04 (PARSE)")
 
-    input_dir  = Path(args.input)
-    output_dir = Path(args.output)
+    input_dir  = Path(str(args.input).strip(' "\'')).resolve()
+    output_dir = Path(str(args.output).strip(' "\'')).resolve()
 
     if not input_dir.exists():
         print(f"ERROR: Input not found: {input_dir}")

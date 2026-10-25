@@ -73,26 +73,36 @@ Options: -DSTRATUM_LOG_ENABLED=1 compiles in tracing (toggle with stratum::set_l
 
 def main():
     ap = argparse.ArgumentParser(description="Stratum Stage 21b - package SDK source folder")
+    _clean = lambda p: Path(str(p).strip(' "\'')).resolve()
     ap.add_argument("--engine", default=str(ROOT / "20_engine_core"))
-    ap.add_argument("--cpp-out", default=str(HERE / "output"), help="Stage 21 main.py output (has include/)")
+    ap.add_argument("--generated", default=None,
+                    help="Folder with metadata_table.cpp/.h + meta_hash.h from 20_engine_core/emit.py "
+                         "(default: <engine>/generated)")
+    ap.add_argument("--cpp-out", "--input", dest="cpp_out", default=None,
+                    help="Stage 21 main.py output (has include/). Default: <this folder>/output")
     ap.add_argument("--runtime", default=str(ROOT / "runtime"))
-    ap.add_argument("--adapters", default=str(ROOT / "05_5_abstract" / "output" / "java" / "com" / "stratum" / "adapters"))
-    ap.add_argument("--output", default=str(HERE / "output" / "stratum"))
+    ap.add_argument("--adapters", default=str(ROOT / "05_5_abstract" / "output" / "java" / "com" / "stratum" / "adapters"),
+                    help="Folder with generated Adapter_*.java (05_5_abstract output/java/com/stratum/adapters)")
+    ap.add_argument("--output", default=None,
+                    help="Packaged SDK folder (any location). Default: <cpp-out>/stratum")
     a = ap.parse_args()
 
-    engine, cpp_out, runtime = Path(a.engine), Path(a.cpp_out), Path(a.runtime)
-    adapters, out = Path(a.adapters), Path(a.output)
+    engine, runtime = _clean(a.engine), _clean(a.runtime)
+    cpp_out = _clean(a.cpp_out) if a.cpp_out else (HERE / "output").resolve()
+    generated = _clean(a.generated) if a.generated else engine / "generated"
+    adapters = _clean(a.adapters)
+    out = _clean(a.output) if a.output else cpp_out / "stratum"
 
     need(engine / "CMakeLists.txt", "engine CMakeLists.txt")
     need(engine / "src", "engine src/")
-    need(engine / "generated" / "metadata_table.cpp", "generated/metadata_table.cpp (run 20_engine_core/emit.py)")
-    need(engine / "generated" / "meta_hash.h", "generated/meta_hash.h")
+    need(generated / "metadata_table.cpp", "generated/metadata_table.cpp (run 20_engine_core/emit.py)")
+    need(generated / "meta_hash.h", "generated/meta_hash.h")
     need(engine / "include" / "stratum_c_abi.h", "stratum_c_abi.h")
     need(cpp_out / "include" / "stratum" / "core.hpp", "C++ headers (run 21_cpp_emit/main.py)")
     need(cpp_out / "include" / "stratum" / "meta_hash.hpp", "meta_hash.hpp")
     need(runtime / "java", "runtime/java")
 
-    h_engine = read_hash(engine / "generated" / "meta_hash.h")
+    h_engine = read_hash(generated / "meta_hash.h")
     h_sdk = read_hash(cpp_out / "include" / "stratum" / "meta_hash.hpp")
     if h_engine != h_sdk:
         die(f"meta hash mismatch: engine={h_engine} headers={h_sdk}. "
@@ -101,13 +111,17 @@ def main():
     # never delete the folder we are reading from
     if out.resolve() in (cpp_out.resolve(), cpp_out.resolve() / "include"):
         die("--output must not be the same as --cpp-out or its include/ dir")
+    for _src in (engine, cpp_out, runtime, adapters, generated):
+        _s = _src.resolve()
+        if out.resolve() == _s or out.resolve() in _s.parents:
+            die(f"--output ({out}) must not equal or contain a source folder: {_s}")
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
 
     shutil.copy2(engine / "CMakeLists.txt", out / "CMakeLists.txt")
     n_src = copy_files(engine / "src", out / "src", ["*.cpp", "*.h", "*.hpp"])
-    n_gen = copy_files(engine / "generated", out / "generated", ["*.cpp", "*.h"])
+    n_gen = copy_files(generated, out / "generated", ["*.cpp", "*.h"])
 
     shutil.copytree(cpp_out / "include", out / "include",
                     ignore=shutil.ignore_patterns("__pycache__"))

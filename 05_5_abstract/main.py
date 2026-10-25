@@ -1057,8 +1057,8 @@ def main() -> None:
     Logger.info(f"Input Path     : {args.input}")
     Logger.info(f"Output Path    : {args.output}")
 
-    input_dir = Path(args.input)
-    output_dir = Path(args.output)
+    input_dir = Path(str(args.input).strip(' "\'')).resolve()
+    output_dir = Path(str(args.output).strip(' "\'')).resolve()
 
     if not input_dir.exists():
         Logger.error(f"Input directory does not exist: {input_dir}")
@@ -1066,7 +1066,7 @@ def main() -> None:
 
     patched_dir = output_dir / "patched"
     if args.output_java:
-        java_out_dir = Path(args.output_java)
+        java_out_dir = Path(str(args.output_java).strip(' "\'')).resolve()
     else:
         java_out_dir = output_dir / "java" / "com" / "stratum" / "adapters"
 
@@ -1098,7 +1098,7 @@ def main() -> None:
         sys.exit(1)
 
     normalizer = build_fqn_normalizer(registry)
-    targets_config_path = Path("05_5_abstract") / "targets.json"
+    targets_config_path = Path(__file__).resolve().parent / "targets.json"
     raw_seeds, raw_avoids, raw_reserved, seeds_only = load_targets(targets_config_path)
 
     resolved_seeds: List[str] = []

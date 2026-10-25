@@ -51,8 +51,33 @@ def _int_or_none(v):
         return None
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _clean_path(p) -> Path:
+    return Path(str(p).strip(' "\'')).resolve()
+
+
+def load_setup_report(setup_arg, input_dir: Path, output_dir: Path):
+    """Return (report_dict, report_path). ({}, None) if not found."""
+    candidates = []
+    if setup_arg:
+        p = _clean_path(setup_arg)
+        candidates.append(p / "setup_report.json" if p.is_dir() else p)
+    else:
+        for base in (input_dir.parent, output_dir.parent):
+            candidates.append(base / "00_setup" / "setup_report.json")
+    for c in candidates:
+        if c.is_file():
+            try:
+                return json.loads(c.read_text(encoding="utf-8")), c
+            except Exception as e:
+                print(f"  [WARN] Could not read setup report {c}: {e}")
+    return {}, None
+
+
 def locate_api_versions_xml(api_version: str):
-    path = Path("third_party") / "api_versions" / str(api_version) / "api-versions.xml"
+    path = _REPO_ROOT / "third_party" / "api_versions" / str(api_version) / "api-versions.xml"
     if path.exists():
         return str(path.resolve()), f"Found at {path}"
     return None, (
@@ -62,7 +87,7 @@ def locate_api_versions_xml(api_version: str):
 
 
 def locate_hiddenapi_csv(api_version: str):
-    path = Path("third_party") / "hiddenapi" / str(api_version) / "hiddenapi-flags.csv"
+    path = _REPO_ROOT / "third_party" / "hiddenapi" / str(api_version) / "hiddenapi-flags.csv"
     if path.exists():
         return str(path.resolve()), f"Found at {path}"
     return None, (
@@ -202,22 +227,45 @@ def sanitize_class(data: dict, xml_index: dict, hidden_index: dict, strict: bool
 
 def main():
     ap = argparse.ArgumentParser(description="Stratum Stage 04.5 - JNI Safety Sanitizer (optional)")
-    ap.add_argument("--input", required=True, help="Path to 04_parse/output/")
-    ap.add_argument("--output", required=True, help="Path to 04_5_sanitize/output/")
-    ap.add_argument("--api-version", required=True, help="Target Android API level (e.g. 35)")
+    ap.add_argument("--input", required=True, help="Path to 04_parse output (any location)")
+    ap.add_argument("--output", required=True, help="Path to 04_5_sanitize output (any location)")
+    ap.add_argument("--setup", default=None,
+                    help="Path to setup_report.json (or its folder). Optional: auto-detected as <build>/00_setup/")
+    ap.add_argument("--api-version", default=None,
+                    help="Optional override. Default: android_api from setup_report.json")
     ap.add_argument("--strict", action="store_true")
     ap.add_argument("--min-sdk", type=int, default=None)
     args = ap.parse_args()
 
     print_header("STRATUM PIPELINE — STAGE 04.5 (JNI SAFETY SANITIZER, OPTIONAL)")
 
-    input_dir = Path(args.input)
-    output_dir = Path(args.output)
+    input_dir = _clean_path(args.input)
+    output_dir = _clean_path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    xml_path, xml_msg = locate_api_versions_xml(args.api_version)
+    setup, setup_file = load_setup_report(args.setup, input_dir, output_dir)
+    if setup_file:
+        print(f"-> Setup report      : {setup_file}")
+    else:
+        print("-> Setup report      : not found (falling back to third_party/ lookup)")
+    api_version = args.api_version or setup.get("android_api")
+
+    xml_path = setup.get("api_versions_xml_path")
+    if xml_path and Path(xml_path).is_file():
+        xml_msg = f"From setup report: {xml_path}"
+    elif api_version:
+        xml_path, xml_msg = locate_api_versions_xml(api_version)
+    else:
+        xml_path, xml_msg = None, "Not provided (optional). Pass --api-versions-xml-path in Stage 00."
     print(f"[{'OK' if xml_path else 'INFO'}] api-versions.xml   : {xml_msg}")
-    csv_path, csv_msg = locate_hiddenapi_csv(args.api_version)
+
+    csv_path = setup.get("hiddenapi_path")
+    if csv_path and Path(csv_path).is_file():
+        csv_msg = f"From setup report: {csv_path}"
+    elif api_version:
+        csv_path, csv_msg = locate_hiddenapi_csv(api_version)
+    else:
+        csv_path, csv_msg = None, "Not provided (optional). Pass --hiddenapi-path in Stage 00."
     print(f"[{'OK' if csv_path else 'INFO'}] hiddenapi-flags.csv: {csv_msg}")
 
     xml_index = build_api_versions_index(xml_path)
