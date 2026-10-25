@@ -9,10 +9,9 @@ def print_header(title):
     print(f" {title}")
     print("==================================================")
 
-def generate_default_targets(api_version):
+def generate_default_targets():
     """Generates the exact starter targets.json specified in your architecture."""
     return {
-        "android_version": api_version,
         "mode": "manual",
         "targets": [
             {"fqn": "android.app.Activity", "enabled": True, "priority": 1, "notes": "core lifecycle"},
@@ -51,14 +50,7 @@ def main():
         print(f"ERROR: Input directory not found: {input_dir}")
         sys.exit(1)
 
-    # 1. Read API Version from Stage 01 Summary
-    summary_file = input_dir / "extract_summary.json"
-    api_version = "Unknown"
-    if summary_file.exists():
-        with open(summary_file, 'r') as f:
-            api_version = json.load(f).get("android_version", "Unknown")
-
-    # 2. Scan all .class files
+    # 1. Scan all .class files
     print("-> Scanning extracted classes...")
     class_files = list(input_dir.rglob("*.class"))
     
@@ -122,7 +114,7 @@ def main():
         print(f"-> [SAFE] {targets_file} already exists. Skipping creation to preserve your edits.")
     else:
         print(f"-> Creating starter {targets_file}...")
-        targets_data = generate_default_targets(api_version)
+        targets_data = generate_default_targets()
         with open(targets_file, "w", encoding="utf-8") as f:
             json.dump(targets_data, f, indent=2)
 
