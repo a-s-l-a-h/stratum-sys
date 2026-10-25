@@ -1,0 +1,104 @@
+{
+  "_readme": [
+    "Each entry in 'jobs' is one Android API level. Everything for a job lives in build/API_<n>/ :",
+    "  download/  (platform zip, JDK archive, hiddenapi csv ...)   tools/android/  tools/jdk/   00_setup/ ... 21_cpp_emit/",
+    "api_versions_xml : 'auto' (look inside the extracted platform: android-<n>/data/api-versions.xml, error if missing)",
+    "                   | 'skip' | a direct https URL (downloaded) | a local file path",
+    "hiddenapi_flags  : a direct https URL | 'skip' | a local file path",
+    "jdk.url          : one URL, or a dict keyed by 'windows-x64', 'linux-x64', 'darwin-aarch64' ... (falls back to 'windows'/'linux'/'darwin'/'default')",
+    "jdk.path         : optional, use an already-unpacked JDK folder instead of downloading",
+    "stages           : set a stage to false to skip it (its inputs must already exist from an earlier run)",
+    "zip_dir / zip_name : REQUIRED per job. Where the final zip of the package.py 'stratum/' folder is written. Placeholders: {api}, {api_dir} (= build/API_<n>), {build_root}.",
+    "                     A <zip_name>.sha256 file is written next to it (handy for a release page).",
+    "Stage commands match the manual 'run commands' list exactly; only stage 00 differs (it receives the auto-downloaded jar/jdk/xml/csv paths).",
+    "Downloads are resumable (.part files), retried, verified, and never repeated when a verified file is already present."
+  ],
+
+  "global": {
+    "build_root": "build",
+    "retries": 5,
+    "timeout_seconds": 60,
+    "ndk_path": null
+  },
+
+  "jobs": [
+    {
+      "name": "android-35",
+      "enabled": true,
+      "api_version": "35",
+
+      "android_jar_url": "https://dl.google.com/android/repository/platform-35_r01.zip",
+      "zip_dir": "{api_dir}/21_cpp_emit/release",
+      "zip_name": "stratum_cpp_android_api_{api}.zip",
+      "api_versions_xml": "auto",
+      "hiddenapi_flags": "https://dl.google.com/developers/android/vic/non-sdk/hiddenapi-flags.csv",
+
+      "jdk": {
+        "version": "17",
+        "url": {
+          "windows-x64":   "https://api.adoptium.net/v3/binary/latest/17/ga/windows/x64/jdk/hotspot/normal/eclipse",
+          "linux-x64":     "https://api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jdk/hotspot/normal/eclipse",
+          "linux-aarch64": "https://api.adoptium.net/v3/binary/latest/17/ga/linux/aarch64/jdk/hotspot/normal/eclipse",
+          "darwin-x64":    "https://api.adoptium.net/v3/binary/latest/17/ga/mac/x64/jdk/hotspot/normal/eclipse",
+          "darwin-aarch64":"https://api.adoptium.net/v3/binary/latest/17/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
+        }
+      },
+
+      "stages": {
+        "00_setup": true,
+        "01_extract": true,
+        "02_inspect": true,
+        "03_javap": true,
+        "04_parse": true,
+        "04_5_sanitize": true,
+        "05_resolve_pass1": true,
+        "05_5_abstract": true,
+        "05_resolve_pass2": true,
+        "20_engine_core": true,
+        "21_cpp_emit": true,
+        "21b_package": true,
+        "zip_package": true
+      },
+
+      "options": {
+        "sanitize_strict": true,
+        "min_sdk": null,
+        "closure_mode": null,
+        "abstract_mode": "on",
+        "emit_prefix": "",
+        "targets_file": "02_inspect/targets.json"
+      },
+
+      "extra_args": {}
+    },
+
+    {
+      "_comment": "Example second API. Disabled. Fill in the hiddenapi URL that matches API 34 (or keep 'skip'), and pick the JDK that built this android.jar.",
+      "name": "android-34",
+      "enabled": false,
+      "api_version": "34",
+
+      "android_jar_url": "https://dl.google.com/android/repository/platform-34_r02.zip",
+      "zip_dir": "{api_dir}/21_cpp_emit/release",
+      "zip_name": "stratum_cpp_android_api_{api}.zip",
+      "api_versions_xml": "auto",
+      "hiddenapi_flags": "skip",
+
+      "jdk": {
+        "version": "17",
+        "url": {
+          "windows-x64":   "https://api.adoptium.net/v3/binary/latest/17/ga/windows/x64/jdk/hotspot/normal/eclipse",
+          "linux-x64":     "https://api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jdk/hotspot/normal/eclipse",
+          "darwin-aarch64":"https://api.adoptium.net/v3/binary/latest/17/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
+        }
+      },
+
+      "stages": {
+        "04_5_sanitize": true,
+        "05_5_abstract": true
+      },
+      "options": { "sanitize_strict": true },
+      "extra_args": {}
+    }
+  ]
+}
