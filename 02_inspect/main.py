@@ -39,14 +39,16 @@ def generate_default_targets():
 
 def main():
     parser = argparse.ArgumentParser(description="Stratum Stage 02 - Inspect Classes")
-    parser.add_argument("--input", type=str, required=True, help="Path to 01_extract/output/")
-    parser.add_argument("--output", type=str, required=True, help="Path to 02_inspect/output/")
+    parser.add_argument("--input", type=str, required=True, help="Path to extracted classes directory (e.g., build/API_35/01_extract)")
+    parser.add_argument("--output", type=str, required=True, help="Path to output directory (e.g., build/API_35/02_inspect)")
+    parser.add_argument("--targets", type=str, default=None, help="Optional custom path to targets.json")
     args = parser.parse_args()
 
     print_header("STRATUM PIPELINE - STAGE 02 (INSPECT)")
 
-    input_dir = Path(args.input)
-    if not input_dir.exists():
+    # Resolve input directory cleanly (strips quotes, spaces, resolves absolute path)
+    input_dir = Path(str(args.input).strip(' "\'')).resolve()
+    if not input_dir.is_dir():
         print(f"ERROR: Input directory not found: {input_dir}")
         sys.exit(1)
 
@@ -67,8 +69,8 @@ def main():
     for path in class_files:
         # Get relative path from the input directory
         rel_path = path.relative_to(input_dir)
-        # Convert path separators to dots and remove .class
-        fqn = str(rel_path.with_suffix('')).replace('\\', '.').replace('/', '.')
+        # as_posix() standardizes both Windows '\' and Linux/macOS '/' separators cleanly
+        fqn = rel_path.with_suffix('').as_posix().replace('/', '.')
         all_fqns.append(fqn)
 
         # Split into package and class name
@@ -87,7 +89,7 @@ def main():
     sorted_packages = sorted(package_map.keys())
 
     # 4. Write Output Files
-    out_dir = Path(args.output)
+    out_dir = Path(str(args.output).strip(' "\'')).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # A. Write flat list
@@ -107,13 +109,19 @@ def main():
             f.write("\n")
 
     # 5. Handle targets.json (The Developer Config)
-    # Notice this is placed in 02_inspect/ DIRECTLY, not inside output/
-    targets_file = Path("02_inspect/targets.json")
-    
-    if targets_file.exists():
-        print(f"-> [SAFE] {targets_file} already exists. Skipping creation to preserve your edits.")
+    # Safely locates 02_inspect/targets.json relative to the script location
+    if args.targets:
+        targets_file = Path(str(args.targets).strip(' "\'')).resolve()
     else:
-        print(f"-> Creating starter {targets_file}...")
+        targets_file = (Path(__file__).resolve().parent / "targets.json").resolve()
+    
+    targets_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if targets_file.is_file():
+        print(f"-> [SAFE] {targets_file.name} already exists at: {targets_file}")
+        print("   Skipping creation to preserve your edits.")
+    else:
+        print(f"-> Creating starter {targets_file.name} at: {targets_file}...")
         targets_data = generate_default_targets()
         with open(targets_file, "w", encoding="utf-8") as f:
             json.dump(targets_data, f, indent=2)

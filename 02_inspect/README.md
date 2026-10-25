@@ -1,24 +1,46 @@
 
+
 # Stratum Pipeline — Stage 02: Inspect Classes & Target Configuration
 
 ## Overview & Architectural Context
 
-Stage 02 acts as the boundary between automated extraction and build configuration. It traverses the `.class` filesystem tree produced by **Stage 01**, catalogs all available Fully Qualified Names (FQNs), and generates two browsable reference lists (a flat alphabetical directory and a package-tree breakdown).
+Stage 02 acts as the boundary between raw SDK extraction and pipeline compilation configuration. It traverses the unpacked `.class` directory mirror produced by **Stage 01 (`01_extract`)**, catalogs all available Fully Qualified Names (FQNs), and generates two browsable reference lists (a flat alphabetical index and a package-tree breakdown).
 
-Most importantly, Stage 02 initializes or preserves the primary build configuration file:
+Most importantly, Stage 02 verifies and preserves the primary target configuration file:
 ```
 02_inspect/targets.json
 ```
-This configuration dictates whether subsequent pipeline stages operate in **full API mode** (bridging the entire Android SDK) or **manual mode** (bridging a prioritized subset of classes). Because Stratum's v9/v10 C++ engine uses a unified metadata table rather than per-class C++ templates, `"mode": "full"` can be used without risk of compiler Out-Of-Memory (OOM) errors.
+This configuration dictates whether subsequent pipeline stages operate in **full API mode** (bridging all available Android classes) or **manual mode** (bridging a prioritized subset of classes). Because Stratum's C++ engine uses a unified runtime metadata registry rather than per-class C++ template instantiations, `"mode": "full"` can be enabled without risk of compiler Out-Of-Memory (OOM) failures.
+
+### Key Architectural Guarantees:
+- **CWD-Independent Discovery**: The script locates `targets.json` relative to its own script directory (`Path(__file__).parent`), meaning you can invoke it from the project root, a build subfolder, or a CI script without misplacing configuration files.
+- **Developer Edit Preservation**: If `targets.json` already exists (e.g., configured to `"mode": "full"`), the file is **never modified or overwritten**.
+- **Cross-Platform Resilience**: Handles Windows, macOS, and Linux paths natively, supports paths containing spaces, and strips redundant quotation marks.
 
 ---
 
 ## Quick Start / CLI Demo
 
+### Recommended Pipeline Execution (Matching Build Layout)
 ```bash
 python 02_inspect/main.py \
-    --input "01_extract/output/" \
-    --output "02_inspect/output/"
+    --input "build/API_35/01_extract" \
+    --output "build/API_35/02_inspect"
+```
+
+### Windows PowerShell (With Spaces in Paths)
+```powershell
+python 02_inspect/main.py `
+    --input "D:/My Project/build/API_35/01_extract" `
+    --output "D:/My Project/build/API_35/02_inspect"
+```
+
+### Specifying an Explicit Targets File Location (Optional)
+```bash
+python 02_inspect/main.py \
+    --input "build/API_35/01_extract" \
+    --output "build/API_35/02_inspect" \
+    --targets "02_inspect/targets.json"
 ```
 
 ---
@@ -27,49 +49,66 @@ python 02_inspect/main.py \
 
 | Flag | Type | Required | Description |
 |---|---|:---:|---|
-| `--input` | `Path` | **Yes** | Root directory containing extracted classes and `extract_summary.json` from Stage 01. |
-| `--output` | `Path` | **Yes** | Output directory where `available_classes.txt` and `available_by_package.txt` are written. |
+| `--input` | `Path` | **Yes** | Root directory containing extracted `.class` files from Stage 01 (e.g., `"build/API_35/01_extract"`). Absolute or relative; supports spaces in quotes. |
+| `--output` | `Path` | **Yes** | Destination directory where `available_classes.txt` and `available_by_package.txt` will be written. Automatically created if missing. |
+| `--targets` | `Path` | No | Custom path to `targets.json`. If omitted, defaults safely to `02_inspect/targets.json` adjacent to the script. |
 
 ---
 
 ## Execution Workflow
 
-1. **Input Scan**: Recursively searches `--input` for all files ending in `.class`.
-2. **FQN Normalization**:
-   - Converts filesystem paths to dot-separated class names (e.g., `android/widget/Button.class` $\rightarrow$ `android.widget.Button`).
-   - Splits FQNs into packages and simple names, indexing them into an alphabetized map.
-3. **Artifact Generation**:
-   - Generates `available_classes.txt` (single-column list of all available FQNs).
-   - Generates `available_by_package.txt` (package-grouped layout with per-package class totals).
-4. **Configuration Handling (`targets.json`)**:
-   - Checks for `02_inspect/targets.json` directly in the stage directory (outside `output/` so it is preserved across clean builds).
-   - **If missing**: Generates a default configuration containing starter targets.
-   - **If present**: Leaves the existing file untouched (`[SAFE]` mode), preserving all custom developer edits.
+1. **Path Resolution & Normalization**:
+   - Strips whitespace and outer quotes from `--input`, `--output`, and `--targets`.
+   - Resolves all paths to absolute filesystem locations (`Path.resolve()`).
+   - Validates that `--input` exists and is a valid directory.
+2. **Input Scan**:
+   - Recursively traverses `--input` for all compiled Java bytecode files ending in `.class`.
+   - Exits with an error if no classes are discovered.
+3. **Cross-Platform FQN Normalization**:
+   - Computes relative paths from `--input` using `.as_posix()` to normalize separators (`/` vs `\`).
+   - Strips `.class` and maps directory slashes to standard Java package dots (e.g., `android/widget/Button.class` $\rightarrow$ `android.widget.Button`).
+   - Indexes names into an alphabetical flat list and a package-to-class dictionary.
+4. **Artifact Generation**:
+   - Writes `available_classes.txt`: A single-column, sorted list of every available class FQN.
+   - Writes `available_by_package.txt`: A package-grouped breakdown displaying class densities per package.
+5. **Configuration Handling (`targets.json`)**:
+   - Evaluates the target configuration path (defaulting to `02_inspect/targets.json`).
+   - **If present**: Emits a `[SAFE]` notice and leaves existing contents (e.g., `"mode": "full"`) completely untouched.
+   - **If missing**: Generates a default starter configuration containing standard Android core classes.
 
 ---
 
 ## Output Structure
 
 ```text
-02_inspect/
-├── targets.json                       <-- Editable configuration (Version controlled)
-└── output/
+stratum-sys/
+├── 02_inspect/
+│   ├── main.py
+│   └── targets.json                   <-- Developer config (Preserved across runs)
+│
+└── build/API_35/02_inspect/           <-- Build-specific artifacts
     ├── available_classes.txt          <-- Alphabetical flat list of all FQNs
-    └── available_by_package.txt       <-- Package-grouped index with counts
+    └── available_by_package.txt       <-- Package-grouped index with class counts
 ```
-
-
 
 ---
 
-## Target Configuration Reference (`02_inspect/targets.json`)
+## Target Configuration Reference (`targets.json`)
 
-### Unified Schema Example
-
+### 1. Full Mode (Recommended for Complete SDK Generation)
+Processes every `.class` file extracted in Stage 01. The `targets` list is bypassed:
 ```json
 {
-  "android_version": "35",
   "mode": "full",
+  "targets": []
+}
+```
+
+### 2. Manual Mode (Selective / Targeted Compilation)
+Processes only classes explicitly registered with `"enabled": true`:
+```json
+{
+  "mode": "manual",
   "targets": [
     {
       "fqn": "android.app.Activity",
@@ -81,13 +120,13 @@ python 02_inspect/main.py \
       "fqn": "android.view.View",
       "enabled": true,
       "priority": 1,
-      "notes": "base of everything"
+      "notes": "base UI component"
     },
     {
-      "fqn": "android.widget.Button",
-      "enabled": true,
-      "priority": 1,
-      "notes": "core UI"
+      "fqn": "android.widget.DatePicker",
+      "enabled": false,
+      "priority": 3,
+      "notes": "disabled for current test run"
     }
   ]
 }
@@ -95,10 +134,10 @@ python 02_inspect/main.py \
 
 ### Operational Modes (`mode`)
 
-| Mode | Target Scope | Description |
+| Mode | Scope | Description |
 |---|---|---|
-| `"full"` | **All Classes** | Instructs Stage 03 to process every single `.class` file found in Stage 01. The `targets` list is ignored. |
-| `"manual"` | **Selective** | Only processes items inside `targets` where `"enabled": true`. Useful for targeted testing or constrained builds. |
+| `"full"` | **All Classes** | Instructs Stage 03 to process every single `.class` file cataloged in Stage 01. The `targets` array is ignored. |
+| `"manual"` | **Selective** | Stage 03 only decompiles classes in `targets` where `"enabled": true`. Ideal for rapid iteration or targeted testing. |
 
 ---
 
@@ -106,5 +145,6 @@ python 02_inspect/main.py \
 
 | Exit Code | Reason | Resolution |
 |:---:|---|---|
-| `0` | Success. Catalog lists written and `targets.json` verified. | Review `targets.json` and proceed to **Stage 03 (`03_javap`)**. |
-| `1` | Input directory missing or contains 0 `.class` files. | Run Stage 01 (`01_extract`) first or run with `--force`. |
+| `0` | Success. Class catalogs generated and `targets.json` confirmed. | Proceed to **Stage 03 (`03_javap`)**. |
+| `1` | `--input` directory does not exist or contains 0 `.class` files. | Run Stage 01 (`01_extract`) first or verify `--input` points to the extracted SDK folder. |
+| `1` | Write permissions denied on `--output` or `--targets` location. | Check filesystem permissions for the target directory. |
