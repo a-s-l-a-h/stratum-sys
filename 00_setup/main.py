@@ -90,6 +90,15 @@ def check_android_jar(explicit_jar_path, api_version):
     else:
         return False, None, f"android.jar not found at {jar_path}"
 
+def check_optional_file(path_str, label):
+    """Resolve and verify optional file path if provided"""
+    if not path_str:
+        return True, None, "Not provided (skipped)"
+    p = Path(path_str).resolve()
+    if p.is_file():
+        return True, str(p), f"Found at {p}"
+    return False, None, f"{label} not found at {p}"
+
 # --- Main Execution ---
 
 def main():
@@ -99,6 +108,10 @@ def main():
     parser.add_argument("--jdk-version", "--jdk_version", type=str, default=None, help="Optional expected JDK version to check (e.g. 17, 21)")
     parser.add_argument("--jar-path", "--jar_path", type=str, required=True, help="Direct path to android.jar (Any location, Relative or Absolute)")
     parser.add_argument("--api-version", "--api_version", type=str, default="35", help="Target Android API version (Default: 35)")
+    parser.add_argument("--api-versions-xml-path", "--api_versions_xml_path", type=str, default=None,
+                        help="Direct path to api-versions.xml (Optional)")
+    parser.add_argument("--hiddenapi-path", "--hiddenapi_path", type=str, default=None,
+                        help="Direct path to hiddenapi-flags.csv (Optional)")
     parser.add_argument("--output", type=str, required=True, help="Output directory for setup_report.json")
 
     # Deprecated flags: silently ignored so existing scripts don't break
@@ -125,7 +138,17 @@ def main():
     print(f"[{'OK' if jar_ok else 'FAIL'}] Android API {args.api_version} : {jar_msg}")
     if not jar_ok: errors.append(jar_msg)
 
-    all_ok = all([py_ok, javap_ok, jar_ok])
+    xml_ok, api_versions_xml_path, xml_msg = check_optional_file(args.api_versions_xml_path, "api-versions.xml")
+    if args.api_versions_xml_path:
+        print(f"[{'OK' if xml_ok else 'FAIL'}] api-versions.xml : {xml_msg}")
+        if not xml_ok: errors.append(xml_msg)
+
+    hidden_ok, hiddenapi_path, hidden_msg = check_optional_file(args.hiddenapi_path, "hiddenapi-flags.csv")
+    if args.hiddenapi_path:
+        print(f"[{'OK' if hidden_ok else 'FAIL'}] hiddenapi-flags : {hidden_msg}")
+        if not hidden_ok: errors.append(hidden_msg)
+
+    all_ok = all([py_ok, javap_ok, jar_ok, xml_ok, hidden_ok])
 
     report = {
         "all_ok": all_ok,
@@ -133,6 +156,8 @@ def main():
         "javap_version": javap_msg if javap_ok else None,
         "jdk_version": args.jdk_version,
         "jar_path": jar_path,                          # used by Stage 01
+        "api_versions_xml_path": api_versions_xml_path,
+        "hiddenapi_path": hiddenapi_path,
         "sdk_path": None,
         "android_api": args.api_version,               # used by Stage 01
         "python_version": py_msg,
