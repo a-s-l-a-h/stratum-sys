@@ -6,20 +6,37 @@ import shutil
 import platform
 from pathlib import Path
 from datetime import datetime
+import re
 
 # --- Helper Functions ---
 
-def get_executable(base_path, cmd_name):
-    """Safely find an executable, fully cross-platform (Windows/Mac/Linux)"""
+def resolve_javap_executable(java_path_arg):
+    """
+    Finds and resolves javap to a cross-platform absolute path.
+    Accepts either:
+    1. Path to JDK root (e.g., 'D:/jdk-17' -> automatically looks in 'bin/')
+    2. Direct path to javap (e.g., 'D:/jdk-17/bin/javap.exe')
+    3. None (falls back to system PATH)
+    """
     is_windows = platform.system() == "Windows"
-    exe_name = f"{cmd_name}.exe" if is_windows else cmd_name
+    exe_name = "javap.exe" if is_windows else "javap"
 
-    if base_path:
-        target = Path(base_path) / "bin" / exe_name
-        if target.exists():
-            return str(target.resolve())
+    if java_path_arg:
+        p = Path(java_path_arg).resolve()
+        # Direct executable file
+        if p.is_file():
+            return str(p)
+        if is_windows and p.with_suffix(".exe").is_file():
+            return str(p.with_suffix(".exe"))
+        # Directory passed (check <dir>/bin/javap or <dir>/javap)
+        if p.is_dir():
+            for candidate in (p / "bin" / exe_name, p / exe_name):
+                if candidate.is_file():
+                    return str(candidate)
+        return None
 
-    sys_path = shutil.which(cmd_name)
+    # Fallback to system PATH
+    sys_path = shutil.which("javap")
     return str(Path(sys_path).resolve()) if sys_path else None
 
 # --- Verification Functions ---
@@ -32,62 +49,60 @@ def check_python():
         return True, f"Found v{version_str}"
     return False, f"Found v{version_str}. Require Python 3.10+"
 
-def check_javap(jdk_path):
-    """Find javap and ensure it is version 17+"""
-    javap_path = get_executable(jdk_path, "javap")
+def check_javap(java_path_arg, expected_version=None):
+    """Find javap, verify it executes, and optionally match against --jdk-version"""
+    javap_path = resolve_javap_executable(java_path_arg)
     if not javap_path:
-        return False, None, "Command 'javap' not found. Ensure Java is installed or pass --jdk-path."
+        return False, None, "javap executable not found. Pass --javap-path or add Java to PATH."
 
     try:
         result = subprocess.run([javap_path, "-version"], capture_output=True, text=True, check=True)
         output = result.stdout.strip() or result.stderr.strip()
-        version_str = output.split()[1] if len(output.split()) > 1 else output
 
-        major_version = int(version_str.split('.')[0])
-        if major_version >= 17:
-            return True, javap_path, f"Found v{version_str} at {javap_path}"
-        else:
-            return False, javap_path, f"Found v{version_str}. Require Java 17+."
+        match = re.search(r'(\d+(?:\.\d+)*)', output)
+        if not match:
+            return False, javap_path, f"javap executed, but could not parse version from: '{output}'"
+
+        version_str = match.group(1)
+        major_version = version_str.split('.')[0]
+
+        # If user specified an expected version (e.g., "17", "21", "17.0.2")
+        if expected_version:
+            exp = str(expected_version).strip()
+            # Check major version match (e.g. exp="17" matches "17.0.20") OR prefix match
+            if major_version == exp or version_str.startswith(exp):
+                return True, javap_path, f"Found v{version_str} at {javap_path}"
+            else:
+                return False, javap_path, f"Found v{version_str} at {javap_path}, but does not match expected version '{exp}'"
+
+        return True, javap_path, f"Found v{version_str} at {javap_path}"
     except Exception as e:
-        return False, javap_path, f"Failed to execute javap: {e}"
+        return False, javap_path, f"Failed to execute javap at {javap_path}: {e}"
 
-def check_android_jar(sdk_path, explicit_jar_path, api_version):
-    """Ensure Android jar exists for the requested API version"""
-    if explicit_jar_path:
-        jar_path = Path(explicit_jar_path)
-    elif sdk_path:
-        jar_path = Path(sdk_path) / "platforms" / f"android-{api_version}" / "android.jar"
+def check_android_jar(explicit_jar_path, api_version):
+    """Ensure Android jar exists at the given path (any location accepted)"""
+    if not explicit_jar_path:
+        return False, None, "No path provided. Must provide --jar-path."
+
+    jar_path = Path(explicit_jar_path).resolve()
+    if jar_path.is_file():
+        return True, str(jar_path), f"Found at {jar_path}"
     else:
-        return False, None, "No path provided. Must provide --jar-path or --sdk-path."
-
-    if jar_path.exists():
-        return True, str(jar_path.resolve()), f"Found at {jar_path}"
-    else:
-        return False, None, f"android.jar not found at {jar_path}. Check the path."
-
-def check_ndk_optional(ndk_path):
-    """Optional: only validated if --ndk-path is given. The pipeline itself no longer builds anything."""
-    if not ndk_path:
-        return True, None, "Skipped (not needed: builds are done by Android Studio/Gradle)"
-
-    ndk_dir = Path(ndk_path)
-    if not ndk_dir.exists():
-        return False, None, f"Provided NDK path does not exist: {ndk_path}"
-    return True, str(ndk_dir.resolve()), f"Found at {ndk_dir}"
+        return False, None, f"android.jar not found at {jar_path}"
 
 # --- Main Execution ---
 
 def main():
     parser = argparse.ArgumentParser(description="Stratum Stage 00 - Setup and Validation")
-    parser.add_argument("--jdk-path", type=str, help="Path to JDK 17+ (Optional if JAVA_HOME/javap is on PATH)")
-    parser.add_argument("--sdk-path", type=str, help="Path to full Android SDK (Optional if --jar-path is used)")
-    parser.add_argument("--jar-path", type=str, help="Direct path to android.jar (Bypasses --sdk-path)")
-    parser.add_argument("--api-version", type=str, default="35", help="Target Android API version (Default: 35)")
-    parser.add_argument("--ndk-path", type=str, help="(Optional) Android NDK path; only validated if given")
+    parser.add_argument("--javap-path", "--javap_path", "--jdk-path", "--jdk_path", dest="java_path", type=str,
+                        help="Path to javap executable OR JDK root directory (Optional if Java is on PATH)")
+    parser.add_argument("--jdk-version", "--jdk_version", type=str, default=None, help="Optional expected JDK version to check (e.g. 17, 21)")
+    parser.add_argument("--jar-path", "--jar_path", type=str, required=True, help="Direct path to android.jar (Any location, Relative or Absolute)")
+    parser.add_argument("--api-version", "--api_version", type=str, default="35", help="Target Android API version (Default: 35)")
     parser.add_argument("--output", type=str, required=True, help="Output directory for setup_report.json")
 
-    # Deprecated flags: still ACCEPTED (and ignored) so old command lines don't break.
-    for old in ("--ndk-api", "--cmake-path", "--nanobind-version", "--python-target-version", "--py-version"):
+    # Deprecated flags: silently ignored so existing scripts don't break
+    for old in ("--sdk-path", "--sdk_path", "--ndk-path", "--ndk_path", "--ndk-api", "--cmake-path", "--nanobind-version", "--python-target-version", "--py-version"):
         parser.add_argument(old, type=str, default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
@@ -102,33 +117,30 @@ def main():
     print(f"[{'OK' if py_ok else 'FAIL'}] Python 3.10+   : {py_msg}")
     if not py_ok: errors.append(py_msg)
 
-    javap_ok, javap_path, javap_msg = check_javap(args.jdk_path)
+    javap_ok, javap_path, javap_msg = check_javap(args.java_path, args.jdk_version)
     print(f"[{'OK' if javap_ok else 'FAIL'}] Java (javap)   : {javap_msg}")
     if not javap_ok: errors.append(javap_msg)
 
-    jar_ok, jar_path, jar_msg = check_android_jar(args.sdk_path, args.jar_path, args.api_version)
+    jar_ok, jar_path, jar_msg = check_android_jar(args.jar_path, args.api_version)
     print(f"[{'OK' if jar_ok else 'FAIL'}] Android API {args.api_version} : {jar_msg}")
     if not jar_ok: errors.append(jar_msg)
 
-    ndk_ok, ndk_resolved_path, ndk_msg = check_ndk_optional(args.ndk_path)
-    print(f"[{'OK' if ndk_ok else 'FAIL'}] Android NDK    : {ndk_msg}")
-    if not ndk_ok: errors.append(ndk_msg)
-
-    all_ok = all([py_ok, javap_ok, jar_ok, ndk_ok])
+    all_ok = all([py_ok, javap_ok, jar_ok])
 
     report = {
         "all_ok": all_ok,
         "javap_path": javap_path,                      # used by Stage 03
         "javap_version": javap_msg if javap_ok else None,
+        "jdk_version": args.jdk_version,
         "jar_path": jar_path,                          # used by Stage 01
-        "sdk_path": str(Path(args.sdk_path).resolve()) if args.sdk_path else None,
+        "sdk_path": None,
         "android_api": args.api_version,               # used by Stage 01
         "python_version": py_msg,
-        "ndk_path": ndk_resolved_path,                 # optional, informational only
+        "ndk_path": None,
         "timestamp": datetime.now().isoformat()
     }
 
-    out_dir = Path(args.output)
+    out_dir = Path(args.output).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "setup_report.json"
 
