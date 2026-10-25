@@ -11,9 +11,22 @@ https://github.com/a-s-l-a-h/stratum
 
 # 🌉 Stratum-sys
 
+---
+### Automated 
 
+configure pipeline.json 
+
+Then run 
+
+python run_pipeline_helper.py --list        # check the config loads, shows jobs and stage toggles
+python run_pipeline_helper.py --dry-run     # prints every command without downloading or running anything
+python run_pipeline_helper.py               # full run for all enabled jobs
+python run_pipeline_helper.py --job 35      # just API 35
 
 ---
+
+---
+### Manual step by step
 
 # Run commands for quick look
 
