@@ -87,8 +87,17 @@ def main():
     with open(setup_file, "r", encoding="utf-8") as f:
         setup = json.load(f)
 
-    raw_javap = setup.get("javap_path", "javap")
-    javap_path = str(Path(raw_javap).resolve()) if raw_javap and Path(raw_javap).is_file() else raw_javap
+    raw_javap = setup.get("javap_path")
+    if not raw_javap:
+        print("ERROR: 'javap_path' is missing or empty in setup_report.json.")
+        sys.exit(1)
+
+    javap_bin = Path(raw_javap).resolve()
+    if not javap_bin.is_file():
+        print(f"ERROR: Specified javap executable does not exist at: {javap_bin}")
+        sys.exit(1)
+
+    javap_path = str(javap_bin)
     print(f"-> javap path : {javap_path}")
 
     # ── Read targets.json ──────────────────────────────────────────────────────
