@@ -13,26 +13,34 @@ def print_header(title):
     print("==================================================")
 
 def load_setup_report(setup_path):
-    """Load paths from Stage 00 report."""
-    setup_file = Path(setup_path)
-    if not setup_file.exists():
-        print(f"ERROR: Setup report not found at {setup_file}")
-        print("Please run Stage 00 first.")
+    """Load paths from Stage 00 report with full cross-platform resolution."""
+    # Clean whitespace and accidental raw quotes
+    clean_path = str(setup_path).strip(' "\'')
+    setup_file = Path(clean_path).resolve()
+
+    # If the user passed the output directory instead of the json file itself
+    if setup_file.is_dir():
+        setup_file = setup_file / "setup_report.json"
+
+    if not setup_file.is_file():
+        print(f"ERROR: Setup report not found at: {setup_file}")
+        print("Please run Stage 00 first or verify the path provided to --setup.")
         sys.exit(1)
-        
-    with open(setup_file, 'r') as f:
+
+    with open(setup_file, "r", encoding="utf-8") as f:
         return json.load(f)
 
 def extract_jar(jar_path, out_dir):
     """Extract all .class files from the Android JAR."""
-    jar_file = Path(jar_path)
-    if not jar_file.exists():
-        print(f"ERROR: android.jar not found at {jar_file}")
+    jar_file = Path(str(jar_path).strip(' "\'')).resolve()
+    if not jar_file.is_file():
+        print(f"ERROR: android.jar not found at: {jar_file}")
         sys.exit(1)
 
     print(f"\n-> Opening {jar_file.name}...")
-    
-    out_path = Path(out_dir)
+    print(f"   Source JAR: {jar_file}")
+
+    out_path = Path(str(out_dir).strip(' "\'')).resolve()
     out_path.mkdir(parents=True, exist_ok=True)
 
     total_classes = 0
@@ -86,21 +94,21 @@ def main():
         print("ERROR: jar_path missing in setup_report.json.")
         sys.exit(1)
 
-    out_dir = Path(args.output)
+    out_dir = Path(str(args.output).strip(' "\'')).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
     summary_file = out_dir / "extract_summary.json"
 
     # 2. Check Cache (Optimization)
-    if summary_file.exists() and not args.force:
+    if summary_file.is_file() and not args.force:
         print(f"\n[CACHE HIT] Extraction already completed for API {api_version}.")
         print("Use --force to re-extract.")
-        print(f"Output is safely stored at: {out_dir.resolve()}")
+        print(f"Output is safely stored at: {out_dir}")
         sys.exit(0)
 
     # 3. Perform Extraction
     total_classes, package_counts, elapsed = extract_jar(jar_path, out_dir)
 
     # 4. Generate Summary Report
-    # Sort packages by size (largest first) to make the JSON nice to read
     sorted_packages = dict(sorted(package_counts.items(), key=lambda item: item[1], reverse=True))
 
     summary = {
@@ -111,7 +119,7 @@ def main():
         "timestamp": datetime.now().isoformat()
     }
 
-    with open(summary_file, "w") as f:
+    with open(summary_file, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     # 5. Print Results
