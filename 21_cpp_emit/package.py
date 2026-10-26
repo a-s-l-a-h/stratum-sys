@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Stage 21b: assemble the self-contained `stratum/` SDK folder (source only, no build).
+Stage 21b: assemble the self-contained SDK folder `stratum/` (source only, no build).
 
-Run order:
-    python 20_engine_core/emit.py --input 05_resolve/output_patched
-    python 21_cpp_emit/main.py    --input 05_resolve/output_patched [--emit-prefix ...]
-    python 21_cpp_emit/package.py
-
-Result: 21_cpp_emit/output/stratum/  -> copy into app/src/main/cpp/stratum/
+    stratum/
+    ├── README.md
+    ├── cpp/                      -> merge into app/src/main/cpp/
+    │   ├── CMakeLists.txt, native-lib.cpp
+    │   └── stratum/              engine (CMakeLists.txt, src/, generated/, include/)
+    └── stratum-runtime/          -> copy to <project root>/stratum-runtime
+        ├── build.gradle (rendered), consumer-rules.pro
+        └── src/main/{AndroidManifest.xml, java/com/stratum/{runtime,adapters}}
 """
 import argparse, re, shutil, sys
 from pathlib import Path
@@ -44,31 +46,20 @@ def read_hash(path: Path) -> str:
     return m.group(1)
 
 
-README = """# Stratum C++ SDK (source)
+def render(src: Path, dst: Path, values: dict):
+    text = src.read_text(encoding="utf-8")
+    for k, v in values.items():
+        text = text.replace(f"@@{k}@@", str(v))
+    left = re.findall(r"@@[A-Z_]+@@", text)
+    if left:
+        die(f"unresolved placeholders {sorted(set(left))} in {src}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(text, encoding="utf-8")
 
-Everything needed to use Stratum from C++ in an Android Studio project.
 
-## Setup
-1. Copy this whole `stratum/` folder to `app/src/main/cpp/stratum/`.
-2. `app/src/main/cpp/CMakeLists.txt`:
-
-       add_subdirectory(stratum)
-       add_library(myapp SHARED my_code.cpp)
-       find_library(log-lib log)
-       target_link_libraries(myapp PRIVATE stratum ${log-lib})
-
-3. `app/build.gradle(.kts)`:
-   - externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt") } }
-   - add `src/main/cpp/stratum/java` as a Java source dir
-   - dependency: androidx.appcompat:appcompat
-4. Merge `android/AndroidManifest.snippet.xml` into your manifest only if you use
-   StratumService / StratumReceiver.
-5. Your Activity extends `com.stratum.runtime.StratumActivity` and loads YOUR native
-   library in `onImportMain()` (before lifecycle events are dispatched).
-6. In C++: `#include <stratum/stratum.hpp>` and define `void onCreate(stratum::Activity act)`.
-
-Options: -DSTRATUM_LOG_ENABLED=1 compiles in tracing (toggle with stratum::set_log_enabled).
-"""
+def java_const(v: str) -> str:
+    v = str(v).strip()
+    return "VERSION_1_8" if v in ("8", "1.8") else f"VERSION_{v}"
 
 
 def main():
@@ -76,15 +67,16 @@ def main():
     _clean = lambda p: Path(str(p).strip(' "\'')).resolve()
     ap.add_argument("--engine", default=str(ROOT / "20_engine_core"))
     ap.add_argument("--generated", default=None,
-                    help="Folder with metadata_table.cpp/.h + meta_hash.h from 20_engine_core/emit.py "
-                         "(default: <engine>/generated)")
+                    help="metadata_table.cpp/.h + meta_hash.h folder (default: <engine>/generated)")
     ap.add_argument("--cpp-out", "--input", dest="cpp_out", default=None,
                     help="Stage 21 main.py output (has include/). Default: <this folder>/output")
-    ap.add_argument("--runtime", default=str(ROOT / "runtime"))
-    ap.add_argument("--adapters", default=str(ROOT / "05_5_abstract" / "output" / "java" / "com" / "stratum" / "adapters"),
-                    help="Folder with generated Adapter_*.java (05_5_abstract output/java/com/stratum/adapters)")
-    ap.add_argument("--output", default=None,
-                    help="Packaged SDK folder (any location). Default: <cpp-out>/stratum")
+    ap.add_argument("--runtime", default=str(ROOT / "runtime"),
+                    help="runtime/ folder containing stratum-runtime/ and templates/")
+    ap.add_argument("--adapters", default=str(ROOT / "05_5_abstract" / "output" / "java" / "com" / "stratum" / "adapters"))
+    ap.add_argument("--output", default=None, help="Packaged SDK folder. Default: <cpp-out>/stratum")
+    ap.add_argument("--api-version", required=True, help="Android API the SDK was generated from (-> compileSdk)")
+    ap.add_argument("--min-sdk", default="24", help="minSdk of the runtime module")
+    ap.add_argument("--java-version", default="1.8", help="Java level of the runtime module (1.8, 11, 17)")
     a = ap.parse_args()
 
     engine, runtime = _clean(a.engine), _clean(a.runtime)
@@ -93,6 +85,7 @@ def main():
     adapters = _clean(a.adapters)
     out = _clean(a.output) if a.output else cpp_out / "stratum"
 
+    rt_mod, tpl = runtime / "stratum-runtime", runtime / "templates"
     need(engine / "CMakeLists.txt", "engine CMakeLists.txt")
     need(engine / "src", "engine src/")
     need(generated / "metadata_table.cpp", "generated/metadata_table.cpp (run 20_engine_core/emit.py)")
@@ -100,7 +93,12 @@ def main():
     need(engine / "include" / "stratum_c_abi.h", "stratum_c_abi.h")
     need(cpp_out / "include" / "stratum" / "core.hpp", "C++ headers (run 21_cpp_emit/main.py)")
     need(cpp_out / "include" / "stratum" / "meta_hash.hpp", "meta_hash.hpp")
-    need(runtime / "java", "runtime/java")
+    need(rt_mod / "src" / "main" / "java", "runtime/stratum-runtime/src/main/java")
+    need(rt_mod / "src" / "main" / "AndroidManifest.xml", "runtime/stratum-runtime/src/main/AndroidManifest.xml")
+    need(rt_mod / "consumer-rules.pro", "runtime/stratum-runtime/consumer-rules.pro")
+    need(rt_mod / "build.gradle.template", "runtime/stratum-runtime/build.gradle.template")
+    for t in ("CMakeLists.txt", "native-lib.cpp", "SDK_README.md"):
+        need(tpl / t, f"runtime/templates/{t}")
 
     h_engine = read_hash(generated / "meta_hash.h")
     h_sdk = read_hash(cpp_out / "include" / "stratum" / "meta_hash.hpp")
@@ -108,49 +106,53 @@ def main():
         die(f"meta hash mismatch: engine={h_engine} headers={h_sdk}. "
             "Re-run 20_engine_core/emit.py and 21_cpp_emit/main.py from the SAME input.")
 
-    # never delete the folder we are reading from
-    if out.resolve() in (cpp_out.resolve(), cpp_out.resolve() / "include"):
+    # never delete a folder we are reading from
+    if out in (cpp_out, cpp_out / "include"):
         die("--output must not be the same as --cpp-out or its include/ dir")
     for _src in (engine, cpp_out, runtime, adapters, generated):
-        _s = _src.resolve()
-        if out.resolve() == _s or out.resolve() in _s.parents:
-            die(f"--output ({out}) must not equal or contain a source folder: {_s}")
+        if out == _src or out in _src.parents:
+            die(f"--output ({out}) must not equal or contain a source folder: {_src}")
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
 
-    shutil.copy2(engine / "CMakeLists.txt", out / "CMakeLists.txt")
-    n_src = copy_files(engine / "src", out / "src", ["*.cpp", "*.h", "*.hpp"])
-    n_gen = copy_files(generated, out / "generated", ["*.cpp", "*.h"])
+    values = dict(COMPILE_SDK=a.api_version, MIN_SDK=a.min_sdk,
+                  JAVA_VERSION=java_const(a.java_version), META_HASH=h_engine)
 
-    shutil.copytree(cpp_out / "include", out / "include",
-                    ignore=shutil.ignore_patterns("__pycache__"))
-    shutil.copy2(engine / "include" / "stratum_c_abi.h", out / "include" / "stratum_c_abi.h")
+    # ── cpp/ : app-side CMake + demo + engine ────────────────────────────────
+    cpp_dir = out / "cpp"
+    eng_dir = cpp_dir / "stratum"
+    eng_dir.mkdir(parents=True, exist_ok=True)          # also creates cpp_dir
+    shutil.copy2(tpl / "CMakeLists.txt", cpp_dir / "CMakeLists.txt")
+    shutil.copy2(tpl / "native-lib.cpp", cpp_dir / "native-lib.cpp")
+    shutil.copy2(engine / "CMakeLists.txt", eng_dir / "CMakeLists.txt")
+    n_src = copy_files(engine / "src", eng_dir / "src", ["*.cpp", "*.h", "*.hpp"])
+    n_gen = copy_files(generated, eng_dir / "generated", ["*.cpp", "*.h"])
+    shutil.copytree(cpp_out / "include", eng_dir / "include", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copy2(engine / "include" / "stratum_c_abi.h", eng_dir / "include" / "stratum_c_abi.h")
 
-    shutil.copytree(runtime / "java", out / "java", ignore=shutil.ignore_patterns("__pycache__"))
+    # ── stratum-runtime/ : Android library module ───────────────────────────
+    mod = out / "stratum-runtime"
+    shutil.copytree(rt_mod, mod, ignore=shutil.ignore_patterns(
+        "__pycache__", "build", "*.iml", "build.gradle.template", "build.gradle"))
+    render(rt_mod / "build.gradle.template", mod / "build.gradle", values)
     n_ad = 0
     if adapters.exists():
-        n_ad = copy_files(adapters, out / "java" / "com" / "stratum" / "adapters", ["*.java"])
+        n_ad = copy_files(adapters, mod / "src" / "main" / "java" / "com" / "stratum" / "adapters", ["*.java"])
     else:
         print(f"-> note: no adapters dir at {adapters} (Stage 05.5 off?) - skipped")
 
-    if (runtime / "AndroidManifest.xml").exists():
-        (out / "android").mkdir()
-        shutil.copy2(runtime / "AndroidManifest.xml", out / "android" / "AndroidManifest.snippet.xml")
-    if (runtime / "consumer-rules.pro").exists():
-        shutil.copy2(runtime / "consumer-rules.pro", out / "consumer-rules.pro")
+    render(tpl / "SDK_README.md", out / "README.md", values)
 
-    (out / "README.md").write_text(README, encoding="utf-8")
-
-    n_hpp = len(list((out / "include").rglob("*.hpp")))
+    n_hpp = len(list((eng_dir / "include").rglob("*.hpp")))
     print("=" * 60)
-    print(f" STRATUM SDK PACKAGED  (meta hash {h_engine})")
+    print(f" STRATUM SDK PACKAGED  (meta hash {h_engine}, compileSdk {a.api_version})")
     print("=" * 60)
     print(f"-> engine sources : {n_src} files, generated: {n_gen} files")
     print(f"-> C++ headers    : {n_hpp} .hpp")
     print(f"-> java adapters  : {n_ad}")
     print(f"-> output         : {out}")
-    print("Copy that folder to <app>/src/main/cpp/stratum/")
+    print("   cpp/ -> app/src/main/cpp/    stratum-runtime/ -> <project root>/stratum-runtime")
 
 
 if __name__ == "__main__":

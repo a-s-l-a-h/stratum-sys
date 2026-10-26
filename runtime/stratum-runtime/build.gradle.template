@@ -1,0 +1,29 @@
+plugins {
+    id 'com.android.library'
+}
+
+android {
+    namespace 'com.stratum.runtime'
+    compileSdk @@COMPILE_SDK@@          // = the API level the adapters were generated from
+
+    defaultConfig {
+        minSdk @@MIN_SDK@@
+        consumerProguardFiles "consumer-rules.pro"
+    }
+
+    // Lowest level on purpose: a library built at 1.8 works with apps at 8/11/17/21.
+    compileOptions {
+        sourceCompatibility JavaVersion.@@JAVA_VERSION@@
+        targetCompatibility JavaVersion.@@JAVA_VERSION@@
+    }
+
+    buildTypes {
+        release { minifyEnabled false }
+    }
+}
+
+dependencies {
+    // api: the app's Activity extends StratumActivity -> AppCompatActivity must be visible to it
+    api 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+}

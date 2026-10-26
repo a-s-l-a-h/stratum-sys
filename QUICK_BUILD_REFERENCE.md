@@ -60,7 +60,8 @@ Optional: add `--emit-prefix "android.app,android.view"` to emit only some packa
 
 ### Stage 21b: package
 ```
-python 21_cpp_emit/package.py --input "build/API_35/21_cpp_emit/output" --generated "build/API_35/20_engine_core/generated" --adapters "build/API_35/05_5_abstract/output/java/com/stratum/adapters" --output "build/API_35/21_cpp_emit/output/stratum"
+
+python 21_cpp_emit/package.py --input "build/API_35/21_cpp_emit/output" --generated "build/API_35/20_engine_core/generated" --adapters "build/API_35/05_5_abstract/output/java/com/stratum/adapters" --output "build/API_35/21_cpp_emit/output/stratum" --api-version 35 --min-sdk 24 --java-version 11
 ```
 Copy the resulting `stratum/` folder to `app/src/main/cpp/stratum/` in Android Studio and build there.
 

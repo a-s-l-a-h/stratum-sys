@@ -66,7 +66,9 @@
         "closure_mode": null,
         "abstract_mode": "on",
         "emit_prefix": "",
-        "targets_file": "02_inspect/targets.json"
+        "targets_file": "02_inspect/targets.json",
+        "runtime_min_sdk": 24,
+        "runtime_java_version": "11"
       },
 
       "extra_args": {}

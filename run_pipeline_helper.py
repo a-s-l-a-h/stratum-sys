@@ -532,7 +532,10 @@ def build_stages(j: Job):
         return cmd + x("21_cpp_emit")
 
     def s21b():
-        cmd = [py, "21_cpp_emit/package.py", "--input", j.e21, "--generated", j.e20]
+        cmd = [py, "21_cpp_emit/package.py", "--input", j.e21, "--generated", j.e20,
+               "--api-version", j.api,
+               "--min-sdk", str(o.get("runtime_min_sdk", 24)),
+               "--java-version", str(o.get("runtime_java_version", "1.8"))]
         adapters = j.s055 / "java" / "com" / "stratum" / "adapters"
         if adapters.exists() or j.on("05_5_abstract"):
             cmd += ["--adapters", adapters]
@@ -552,7 +555,8 @@ def build_stages(j: Job):
         j.zip_path.with_name(j.zip_path.name + ".sha256").write_text(f"{h}  {j.zip_path.name}\n", encoding="utf-8")
         log(f"   zip    : {rel(j.zip_path)} ({human(j.zip_path.stat().st_size)})")
         log(f"   sha256 : {h}")
-        log("   -> unzip gives a stratum/ folder: copy it to <app>/src/main/cpp/stratum/ in Android Studio")
+        log("   -> unzip gives stratum/: follow stratum/README.md "
+            "(cpp/ -> app/src/main/cpp/, stratum-runtime/ -> project root)")
 
     tf = lambda: o.get("targets_file", "02_inspect/targets.json")
     return [
