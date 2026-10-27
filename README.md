@@ -1,269 +1,304 @@
-# Stratum-Sys
+# Stratum-sys
 
-Stratum-sys is an offline code generation pipeline and lightweight native runtime for Android. It introspects `android.jar`, extracts bytecode signatures, and generates:
+Stratum-sys reads `android.jar` and generates what native code needs to call the Android SDK without hand-written JNI:
 
-1. **A standalone C engine (`libstratum.so`)** exposing a stable, pure C ABI (`stratum_c_abi.h`).
-2. **A header-only C++17 SDK** that wraps Android platform APIs into RAII-managed, type-safe classes.
-3. **An Android library module (`stratum-runtime`)** containing JVM lifecycle hooks and compiled Java adapter classes for abstract callbacks.
+1. **`libstratum.so`**: a small engine with a plain C interface (`stratum_c_abi.h`). It calls any Android class by `(class_id, slot)` using a generated metadata table.
+2. **A C++17 header set**: one typed wrapper class per Android class (`Button`, `TextView`, `CameraManager`, ...) that calls the C interface.
+3. **`stratum-runtime`**: an Android library module with the Java side (Activity base class, callback dispatch, and generated adapter classes for abstract callbacks).
 
-Instead of writing custom JNI glue for every native-to-Java interaction, native code calls generated C++ classes (or the underlying C ABI) directly.
+The C interface is the core of the project. The C++ headers are the first (and currently only) target built on top of it.
 
----
-
-## 💡 What Problem Does This Solve?
-
-### 1. The "N-Bridge Hell" of Android Native Development
-When building high-performance Android applications containing multiple native engines (compute, physics, signal processing, audio, or custom core logic), traditional development forces you into a fragmented architecture:
-* Every native library requires its own manual JNI bridge or cumbersome Java wrapper to talk to the Java UI.
-* Buffers and data arrays are repeatedly copied back and forth across the JNI boundary between the Java and native heaps, increasing latency and draining battery.
-* Developers waste hundreds of hours maintaining raw JNI boilerplate (`FindClass`, `GetMethodID`, signature strings like `"([BII)V"`), managing local/global references, and debugging memory synchronization issues.
-
-```text
-          ┌────────────────────────────────────────┐
-          │        Android UI / App (Java)         │
-          └───┬────────────────┬───────────────┬───┘
-              │ (JNI Bridge 1) │ (JNI Bridge 2)│ (JNI Bridge 3)
-              ▼                ▼               ▼
-      ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-      │ Native Lib A │ │ Native Lib B │ │ Native Lib C │
-      │   (C / C++)  │ │   (C / C++)  │ │   (C / C++)  │
-      └──────────────┘ └──────────────┘ └──────────────┘
-```
+> **Status:** pre-1.0. One Android API level (35) is enabled by default. 
 
 ---
 
-### 2. The Solution: The "Inverted Bridge" Architecture
-Traditionally, developers must hand-write separate JNI glue code for every native library to expose it to Java.
+## Contents
 
-**Stratum-sys inverts this model:** instead of bridging each native library up to Java, Stratum automatically wraps the entire Android platform (`android.jar`) into native headers. You get **one universal, auto-generated bridge**, allowing your native code to control Android directly without writing a single line of raw JNI:
-
-```text
-            ┌────────────────────────────────────────┐
-            │        Android OS (Platform/Sensors)   │
-            └───────────────────▲────────────────────┘
-                                │ (Single Stratum Bridge)
-    ════════════════════════════╪═════════════════════════════
-    THE NATIVE ENGINE           │
-                                ▼
-       ┌──────────────────────────────────────────────────┐
-       │ Hardware / Sensor Buffer (Native)                │
-       │                         │ (Direct memory pointer)│
-       │                         ▼                        │
-       │                     Native Processing (C / C++)  │
-       │                         │ (Direct memory pointer)│
-       │                         ▼                        │
-       │                     Custom Core Engine (C / C++) │
-       └──────────────────────────────────────────────────┘
-```
+- [The problem](#the-problem)
+- [How it works](#how-it-works)
+- [Quick start](#quick-start)
+- [The pipeline, stage by stage](#the-pipeline-stage-by-stage)
+- [Using the generated SDK](#using-the-generated-sdk)
+- [C++ SDK notes](#c-sdk-notes)
+- [Calling classes that are not in android.jar](#calling-classes-that-are-not-in-androidjar)
+- [The C ABI](#the-c-abi)
+- [Configuration](#configuration-pipelinejson)
+- [Running stages manually](#running-stages-manually)
+- [Repository layout](#repository-layout)
+- [Known limitations](#known-limitations)
+- [Not done yet](#not-done-yet)
+- [Related projects](#related-projects)
 
 ---
 
-### 3. What Stratum-sys Delivers
+## The problem
 
-* **🛡️ Complete JNI Eradication:**  
-  Never write `JNIEnv*`, `FindClass`, method signatures, or manual local-reference management in application logic. Stratum turns the Android SDK into clean, type-safe C++17 classes:
-  ```cpp
-  // No raw JNI — pure, type-safe C++17
-  TextView tv(act);
-  tv.setText("Hello from Native C++");
-  tv.setTextSize(24.0f);
-  btn.setOnClickListener([]() { toast("Clicked!"); });
-  ```
+Calling the Android SDK from native code with raw JNI means, for every call:
 
-* **⚡ Native Processing Pipelines:**  
-  Hardware access, sensor listeners, compute workloads, and UI event orchestration stay inside the native runtime. Intermediate buffers can flow between native libraries via direct pointers without round-tripping through custom Java bridge classes. Direct memory buffers and `ANativeWindow` handles are supported natively.
+- looking up the class and method ID, with the method's type signature written out as a string (`"(Ljava/lang/CharSequence;)V"`);
+- converting arguments (for example, UTF-8 to a Java string);
+- deleting local references and checking for a pending Java exception;
+- for callbacks, writing and shipping a Java class that forwards into a native function.
 
-* **🔌 Universal, C-Friendly ABI (`stratum_c_abi.h`):**  
-  The engine core compiles into a standalone, pure C ABI library (`libstratum.so`). Because the interface is exported via standard C calling conventions, **other programming languages (C, C++, Rust, Zig, Go, or custom runtimes)** can directly call Android APIs without writing custom JNI wrappers.
+**Pure JNI**
 
----
-
-## Technical Architecture
-
-Stratum uses a fixed-slot dispatch mechanism instead of runtime reflection:
-
-```
-[ Your Native Code (C++17 ) ]
-                  │
-                  ▼
-   [ Header-Only Typed C++ Wrappers ]
-                  │
-                  ▼
-       [ stratum_c_abi.h ]
-   (stratum_call_v, _z, _i, _j, _d, _str, _o, _arr)
-                  │
-                  ▼
-         [ libstratum.so ]
-   (Lazy Class Resolution + Cached jmethodID Table)
-                  │
-                  ▼
-         [ Android JVM / ART ]
-```
-
-1. **Deterministic Indexing:** The offline pipeline indexes every class (`class_id`) and method (`slot`). Overloads and method pointers are assigned integer slots at generation time.
-2. **String Pool & Metadata Table:** `libstratum.so` embeds an offset-based string table and class metadata array (`g_classes`). Method names and JNI signatures are never parsed at runtime.
-3. **Lazy Resolution:** Classes and `jmethodID` arrays are resolved and cached on first call per class using a thread-safe mutex and double-checked atomic flags.
-4. **Tag-Driven Parameter Marshalling:** Each method carries a compact `param_tags` string (`Z`, `B`, `s`, `[`, `A`, `a`, `p`, etc.). The dispatcher reads the tag and packs arguments directly into JNI `jvalue` arrays with no signature parsing.
-5. **Abstract Class & Interface Adapters:** Dynamic proxies (`java.lang.reflect.Proxy`) cannot subclass abstract classes. Stratum detects abstract callback patterns (`CameraDevice.StateCallback`, `WebViewClient`, `TextWatcher`) and generates concrete Java adapter source files (`Adapter_<fqn>.java`) that route calls back to native handlers via `StratumInvocationHandler.nativeDispatch`.
-
----
-
-## Requirements
-
-- **Host System:** Linux, macOS, or Windows
-- **Python:** 3.10+
-- **JDK:** Version 17 or 21 (needs `javap` accessible via `PATH` or configured path)
-- **Android Target:** Android SDK platform archive (`android.jar` for the target API level)
-- **Target Project:** Android Studio with NDK and CMake 3.22.1+
-
----
-
-## Automated Pipeline Setup
-
-The automated pipeline runner (`run_pipeline_helper.py`) downloads the required platform tools and JDKs, extracts bytecode, parses signatures, runs sanitization, and packages the complete SDK.
-
-### 1. Configure Build Targets (`pipeline.json`)
-
-Configure the target API level and file outputs in `pipeline.json`:
-```json
-{
-  "jobs": [
-    {
-      "name": "android-35",
-      "enabled": true,
-      "api_version": "35",
-      "android_jar_url": "https://dl.google.com/android/repository/platform-35_r01.zip",
-      "zip_dir": "{api_dir}/21_cpp_emit/release",
-      "zip_name": "stratum_cpp_android_api_{api}.zip",
-      "api_versions_xml": "auto",
-      "hiddenapi_flags": "skip",
-      "options": {
-        "sanitize_strict": true,
-        "abstract_mode": "on",
-        "runtime_min_sdk": 24,
-        "runtime_java_version": "11"
-      }
-    }
-  ]
+```cpp
+void set_title(JNIEnv* env, jobject textView) {
+    jclass cls = env->FindClass("android/widget/TextView");
+    if (!cls) return;
+    jmethodID mid = env->GetMethodID(cls, "setText", "(Ljava/lang/CharSequence;)V");
+    if (!mid) { env->ExceptionClear(); env->DeleteLocalRef(cls); return; }
+    jstring s = env->NewStringUTF("Hello");
+    env->CallVoidMethod(textView, mid, s);
+    if (env->ExceptionCheck()) { env->ExceptionDescribe(); env->ExceptionClear(); }
+    env->DeleteLocalRef(s);
+    env->DeleteLocalRef(cls);
 }
 ```
 
-### 2. Run the Pipeline
+**With Stratum (C++ target)**
 
-Inspect configuration and stages:
-```bash
-python run_pipeline_helper.py --list
+```cpp
+void set_title(TextView tv) {
+    tv.setText(JStr("Hello"));
+}
 ```
 
-Dry-run to verify commands and target directories without execution:
-```bash
-python run_pipeline_helper.py --dry-run
-```
+What changes: the signature string is generated from the real SDK, references are owned by C++ objects, a failed call throws `stratum::JavaException`, and callbacks can be lambdas.
 
-Execute the full build pipeline for an API:
-```bash
-python run_pipeline_helper.py --job 35
-```
-
-Partial execution options:
-```bash
-# Run only specific stages (by prefix)
-python run_pipeline_helper.py --only 20,21
-
-# Resume pipeline starting from a specific stage
-python run_pipeline_helper.py --from 04_5_sanitize
-```
-
-### 3. Generated SDK Layout
-
-When the pipeline finishes, the packaged SDK is located at:
-```
-build/API_<version>/21_cpp_emit/output/stratum/
-├── README.md
-├── cpp/
-│   ├── CMakeLists.txt
-│   ├── native-lib.cpp
-│   └── stratum/              # libstratum.so sources, CMakeLists.txt, include/
-└── stratum-runtime/          # Android Library module (.aar format)
-    ├── build.gradle
-    ├── consumer-rules.pro
-    └── src/main/java/com/stratum/{runtime,adapters}/
-```
+What does not change: the call still crosses into the JVM through JNI. Stratum removes the boilerplate, not the boundary.
 
 ---
 
-## Integrating into an Android Studio Project
+## How it works
 
-### 1. Copy Files into the App Project
-From `build/API_<version>/21_cpp_emit/output/stratum/`:
-1. Copy the `stratum-runtime` folder into your Android project root (next to `app/`).
-2. Copy the `cpp/stratum` directory into your native code directory: `app/src/main/cpp/stratum/`.
+An offline Python pipeline turns `android.jar` into three kinds of output. At runtime, generated headers call the engine, and the engine looks everything up in a table.
 
-### 2. Update Gradle Configuration
-In your project-level `settings.gradle`:
-```groovy
-include ':app'
-include ':stratum-runtime'
+```mermaid
+flowchart LR
+    JAR["android.jar"] --> PIPE["Python pipeline<br/>13 stages"]
+    PIPE --> META["metadata table<br/>+ meta hash"]
+    PIPE --> HDR["C++ headers<br/>(one per class)"]
+    PIPE --> RT["stratum-runtime<br/>Java module + adapters"]
+    META --> SO["libstratum.so<br/>engine + C ABI"]
+    HDR -. calls .-> SO
+    RT -. loaded with .-> SO
 ```
 
-In your application module `app/build.gradle`:
-```groovy
+### One call at runtime
+
+```mermaid
+sequenceDiagram
+    participant App as Your C++
+    participant Hdr as Generated header
+    participant Eng as libstratum.so
+    participant Tbl as Metadata table
+    participant JVM as ART (JNI)
+    App->>Hdr: tv.setText(JStr("Hi"))
+    Hdr->>Eng: stratum_call_v(ptr, class_id, slot, args, &err)
+    Eng->>Tbl: look up class_id, slot
+    Tbl-->>Eng: name, JNI signature, param tags
+    Note over Eng: first use only: resolve jclass and jmethodID, then cache
+    Eng->>JVM: pack args by tag, CallVoidMethodA
+    JVM-->>Eng: result or pending exception
+    Eng-->>Hdr: err = 0 or 1
+    Hdr-->>App: return, or throw JavaException
+```
+
+Design points that follow from the code:
+
+- **Numbers, not names.** Stage 05 assigns every class a `class_id` and every method a `slot`, in a deterministic order. The C++ headers and the engine's table are generated from the same data, so they agree without talking to each other.
+- **Precomputed argument tags.** Each method has a `param_tags` string with one character per parameter (`I`, `s`, `a`, ...). The engine switches on it; it never parses a signature at runtime.
+- **Lazy resolution.** A class's `jclass` and its method and field IDs are looked up the first time the class is used.
+- **Hash check.** Engine and headers each embed a hash of the pipeline input. If they differ, the app aborts at startup with a log message instead of calling the wrong slot. (Define `STRATUM_SKIP_HASH_CHECK` to disable.)
+
+### Callbacks
+
+Java cannot call a C++ lambda directly, so callbacks go through a Java object that forwards into the engine.
+
+```mermaid
+flowchart LR
+    A["Android calls<br/>listener.onX(...)"] --> B{"listener type"}
+    B -- "interface, single method" --> P["java.lang.reflect.Proxy<br/>StratumInvocationHandler"]
+    B -- "abstract class, or<br/>multi-method interface" --> AD["generated Java adapter<br/>Adapter_*.java"]
+    P --> N["nativeDispatch(key, method, args)"]
+    AD --> N
+    N --> R["callback registry<br/>(key -> C++ closure)"]
+    R --> L["your lambda"]
+```
+
+`java.lang.reflect.Proxy` can only implement interfaces, which is why stage 05.5 generates real adapter classes for abstract classes such as `CameraDevice.StateCallback` and `WebViewClient`.
+
+---
+
+## Quick start
+
+**You need:** Python 3.10+, internet access for the first run, and about enough disk space for the platform zip and a JDK. The helper downloads the Android platform zip and a private JDK 17 into `build/API_<n>/`. Nothing is installed system-wide.
+
+```bash
+git clone <this repo>
+cd stratum-sys
+python run_pipeline_helper.py
+```
+
+When it finishes:
+
+```
+build/API_35/21_cpp_emit/output/stratum/                         <- the SDK folder
+build/API_35/21_cpp_emit/release/stratum_cpp_android_api_35.zip  <- the same, zipped (+ .sha256)
+```
+
+Open `stratum/README.md` inside that folder for the step-by-step integration guide.
+
+### Runner options
+
+| Command | Effect |
+|---|---|
+| `python run_pipeline_helper.py` | Run every enabled job in `pipeline.json` |
+| `--job 35` | Only that API level (job name or number, repeatable) |
+| `--only 04,05` | Only stages whose id starts with these prefixes |
+| `--from 04_parse` | Start at a stage and continue to the end |
+| `--dry-run` | Print every command without downloading or running anything |
+| `--list` | Show jobs and which stages are switched off |
+| `--force-download` | Ignore cached downloads |
+
+Downloads are resumable, retried, verified, and not repeated once verified.
+
+---
+
+## The pipeline, stage by stage
+
+```mermaid
+flowchart TD
+    subgraph READ["Read the SDK"]
+        S00["00 setup"] --> S01["01 extract"] --> S02["02 inspect"] --> S03["03 javap"]
+    end
+    subgraph UNDERSTAND["Understand it"]
+        S04["04 parse"] --> S045["04.5 sanitize<br/>(optional)"] --> S05a["05 resolve, pass 1"]
+    end
+    subgraph CALLBACKS["Callbacks"]
+        S055["05.5 abstract adapters"] --> S05b["05 resolve, pass 2"]
+    end
+    subgraph GENERATE["Generate"]
+        S20["20 engine metadata"]
+        S21["21 C++ headers"]
+    end
+    subgraph SHIP["Package"]
+        S21b["21b package"] --> ZIP["zip + sha256"]
+    end
+    S03 --> S04
+    S05a --> S055
+    S05b --> S20
+    S05b --> S21
+    S20 --> S21b
+    S21 --> S21b
+```
+
+| Stage | Reads | Writes | What it does |
+|---|---|---|---|
+| **00 setup** | jar path, JDK path, API level | `setup_report.json` | Checks Python 3.10+, finds `javap`, confirms `android.jar` exists. Later stages read this report instead of taking paths again. |
+| **01 extract** | `setup_report.json` | `.class` files, `extract_summary.json` | Unzips only `.class` files. Skipped if the summary already exists (use `--force`). |
+| **02 inspect** | extracted classes | `available_classes.txt`, `available_by_package.txt`, `targets.json` (if missing) | Lists every class by fully qualified name. `targets.json` chooses between all classes (`"mode": "full"`) and a hand-picked list. |
+| **03 javap** | classes, `targets.json` | one `.javap` file per class | Runs `javap -s -p -constants`. `-s` prints the JNI descriptors the engine needs. |
+| **04 parse** | `.javap` files | one JSON per class | Parses class kind, parent, interfaces, methods, fields and constants, and maps each parameter and return type. |
+| **04.5 sanitize** *(optional)* | parsed JSON | filtered JSON | Drops private members and hidden-API members flagged `blocked`. `--strict` also drops restricted, unsupported and conditional ones. Never deletes a class. |
+| **05 resolve, pass 1** | JSON | JSON with ids | Assigns `class_id`, `slot`, `param_tags`, `ret_type_id`. |
+| **05.5 abstract** | pass-1 JSON | `Adapter_*.java`, patched JSON | Generates Java adapters for abstract callback classes and multi-method interfaces, and marks the matching parameters. |
+| **05 resolve, pass 2** | patched JSON | `output_patched/` | Re-runs the resolver so callback parameters get tag `a` instead of `p`. This output feeds stages 20 and 21. |
+| **20 engine core** | `output_patched/` | `metadata_table.cpp/.h`, `meta_hash.h` | Emits the class/method/field table with one shared string pool. |
+| **21 cpp emit** | `output_patched/` | headers, `API_INDEX.txt` | One header per class. Inherited methods are flattened in. |
+| **21b package** | engine, headers, `runtime/` | `stratum/` folder | Assembles the SDK and renders `build.gradle` and the SDK README from templates. Stops if the two meta hashes differ. |
+| **zip** | `stratum/` | `.zip`, `.zip.sha256` | Compresses the SDK. |
+
+Stage 05 runs twice on purpose. Pass 1 gives stage 05.5 a well-formed corpus; pass 2 is the run whose output is actually used.
+
+### Argument tags
+
+Computed in stage 05, switched on in the engine.
+
+| Tag | Java type | C++ type |
+|---|---|---|
+| `Z B C S I J F D` | primitives | `bool int8_t uint16_t int16_t int32_t int64_t float double` |
+| `s` | `String`, `CharSequence` | `JStr` (UTF-8 view; `nullptr` is Java null) |
+| `a` | abstract-class callback | lambda or `Handlers()` (generated adapter) |
+| `p` | interface callback | lambda (dynamic proxy) |
+| `[ ] q f d b c h` | `byte[] int[] long[] float[] double[] boolean[] char[] short[]` | `Arr<T>` or `std::vector` |
+| `T` | `String[]` | `StrArr` |
+| `A` | `Object[]` and other object arrays | `ObjArr` |
+| `M` | `List`, `Collection`, `Iterable` | `ListArg` (built as `ArrayList`) |
+| `N` | `Map` | `MapArg` (built as `HashMap`) |
+| `L` | any other object | `Object` (a JNI global reference) |
+
+---
+
+## Using the generated SDK
+
+The package has two folders that go to two places in your project:
+
+```
+stratum/
+├── README.md                    full integration guide
+├── cpp/                         -> merge into  app/src/main/cpp/
+│   ├── CMakeLists.txt              builds your library ("myapp")
+│   ├── native-lib.cpp              small demo, replace with your code
+│   └── stratum/                    engine: CMakeLists.txt, src/, generated/, include/
+└── stratum-runtime/             -> copy to  <project root>/stratum-runtime
+    ├── build.gradle                rendered from a template
+    ├── consumer-rules.pro
+    └── src/main/
+        ├── AndroidManifest.xml
+        └── java/com/stratum/{runtime,adapters}/
+```
+
+Your project afterwards:
+
+```
+MyProject/
+├── settings.gradle(.kts)        add ":stratum-runtime"
+├── stratum-runtime/             copied
+└── app/
+    ├── build.gradle(.kts)       point CMake at cpp/, depend on :stratum-runtime
+    └── src/main/
+        ├── cpp/                 copied (CMakeLists.txt, native-lib.cpp, stratum/)
+        └── java/.../MainActivity.java
+```
+
+**1. `settings.gradle.kts`**
+
+```kotlin
+include(":app", ":stratum-runtime")
+```
+
+**2. `app/build.gradle.kts`**
+
+```kotlin
 android {
     defaultConfig {
-        externalNativeBuild {
-            cmake {
-                cppFlags "-std=c++17"
-            }
-        }
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        externalNativeBuild { cmake { cppFlags += "-std=c++17" } }
     }
+    externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt") } }
 }
-
 dependencies {
-    implementation project(':stratum-runtime')
+    implementation(project(":stratum-runtime"))
 }
 ```
 
-### 3. Configure CMake
-In `app/src/main/cpp/CMakeLists.txt`:
-```cmake
-cmake_minimum_required(VERSION 3.22.1)
-project(myapp CXX)
+**3. `MainActivity.java`**
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# Compiles libstratum.so and exports PUBLIC headers
-add_subdirectory(stratum)
-
-add_library(myapp SHARED native-lib.cpp)
-
-find_library(log-lib log)
-target_link_libraries(myapp PRIVATE stratum ${log-lib})
-```
-
-### 4. Wire the Activity
-In `MainActivity.java`:
 ```java
-package com.example.myapp;
-
-import com.stratum.runtime.StratumActivity;
-
 public class MainActivity extends StratumActivity {
     @Override
     protected boolean onImportMain() {
-        // Loads your application native library after libstratum is loaded
-        System.loadLibrary("myapp");
+        System.loadLibrary("myapp");   // must match add_library(myapp ...) in CMakeLists.txt
         return true;
     }
 }
 ```
 
----
+`libstratum.so` is loaded by `StratumActivity` itself. Use an AppCompat-based theme.
 
-## C++ SDK Guide
-
-### 1. Lifecycle Entry Point
-Define `onCreate` in the global namespace in your native library. Stratum auto-wires lifecycle calls via weak symbols:
+**4. `native-lib.cpp`**: `onCreate` is found automatically (weak symbol), with nothing to register.
 
 ```cpp
 #include <stratum/stratum.hpp>
@@ -274,31 +309,25 @@ Define `onCreate` in the global namespace in your native library. Stratum auto-w
 
 using stratum::Activity;
 using stratum::JStr;
-using stratum::Object;
 using stratum::android::widget::LinearLayout;
 using stratum::android::widget::TextView;
 using stratum::android::widget::Button;
 using stratum::android::widget::Toast;
 
-static inline int32_t C(uint32_t c) { return static_cast<int32_t>(c); }
-
 void onCreate(Activity act) {
     LinearLayout root(act);
-    root.setOrientation(LinearLayout::VERTICAL);
-    root.setPadding(32, 48, 32, 32);
+    root.setOrientation(1);                       // VERTICAL
+    root.setPadding(48, 48, 48, 48);
 
-    TextView label(act);
-    label.setText(JStr("Hello from Stratum Native C++"));
-    label.setTextSize(22.0f);
-    label.setTextColor(C(0xFFFFFFFF));
-    root.addView(label);
+    TextView title(act);
+    title.setText(JStr("Hello from Stratum C++"));
+    title.setTextSize(22.0f);
+    root.addView(title);
 
     Button btn(act);
-    btn.setText(JStr("Show Toast"));
+    btn.setText(JStr("Tap me"));
     btn.setOnClickListener([act]() {
-        Toast::makeText(act, JStr("Clicked from C++"), Toast::LENGTH_SHORT)
-             .unchecked_as<Toast>()
-             .show();
+        Toast::makeText(act, JStr("Clicked from C++"), 0).unchecked_as<Toast>().show();
     });
     root.addView(btn);
 
@@ -306,464 +335,205 @@ void onCreate(Activity act) {
 }
 ```
 
-### 2. Core Operational Rules
+Requirements on the app: `compileSdk` at least the API level the SDK was generated for, `minSdk` at least the runtime module's `minSdk` (default 24), NDK and CMake installed in Android Studio.
 
-1. **Default Constructing an Object produces a `NULL` reference:**  
-   `Paint p;` is null. Calling methods on it throws `JavaException`. To construct a no-arg Java object, call its static `create()` method:
-   ```cpp
-   Paint p = Paint::create(); // calls new Paint()
-   ```
-2. **Object Returns are Untyped (`stratum::Object`):**  
-   Cast to specific wrappers using `.as<T>()` (checked via JNI `IsInstanceOf`) or `.unchecked_as<T>()`:
-   ```cpp
-   SensorManager sm = act.getSystemService("sensor").as<SensorManager>();
-   ```
-3. **Strings:**  
-   - Inputs accept `stratum::JStr` (implicitly constructed from `"literals"`, `std::string`, `std::string_view`, or `nullptr`).
-   - String/CharSequence returns are returned as `std::string`.
-4. **Single vs. Multi-Method Callbacks:**  
-   - Single-method listeners accept a plain lambda:
-     ```cpp
-     btn.setOnClickListener([]() { ... });
-     ```
-   - Multi-method listeners or abstract classes use `stratum::Handlers`:
-     ```cpp
-     seek.setOnSeekBarChangeListener(stratum::Handlers()
-         .on("onProgressChanged", [](Object s, int32_t p, bool user) { ... })
-         .on("onStartTrackingTouch", [](Object s) {})
-         .on("onStopTrackingTouch",  [](Object s) {}));
-     ```
-5. **Background Threads:**  
-   Calls that mutate UI views must be posted to the main thread:
-   ```cpp
-   stratum::run_on_ui_thread([label, text]() {
-       label.setText(JStr(text));
-   });
-   ```
-6. **Exception Safety in Callbacks:**  
-   Exceptions escaping C++ callbacks become Java runtime exceptions. Wrap internal callback logic in `try / catch`:
-   ```cpp
-   btn.setOnClickListener([]() {
-       try {
-           // operations
-       } catch (const std::exception& e) {
-           __android_log_print(ANDROID_LOG_ERROR, "App", "%s", e.what());
-       }
-   });
-   ```
+Header paths mirror package names: `android.widget.Button` is `<stratum/android/widget/Button.hpp>` in namespace `stratum::android::widget`. `API_INDEX.txt` in the include folder lists every generated call.
 
 ---
 
-## Dynamic Reflection (`stratum/reflect.hpp`)
+## C++ SDK notes
 
-Stratum's generated headers cover platform classes found in `android.jar`. For classes outside `android.jar` (e.g., `androidx.*`, third-party libraries, or your own app-specific Java classes), use `stratum::reflect`:
+- **A default-constructed object is a null reference.** `Paint p;` is null and calling it throws. For a Java no-argument constructor, the generated header provides `create()`:
+  ```cpp
+  Paint p = Paint::create();
+  ```
+- **Object returns are untyped (`stratum::Object`).** Cast with `.as<T>()` (checked with `IsInstanceOf`) or `.unchecked_as<T>()`:
+  ```cpp
+  auto cm = act.getSystemService(JStr("camera")).as<CameraManager>();
+  ```
+- **Strings.** Arguments take `JStr`, which converts from string literals, `std::string`, `std::string_view` and `nullptr`. The view is only valid for the duration of the call. String and `CharSequence` returns come back as `std::string`.
+- **Callbacks.** A single-method listener takes a lambda. Abstract classes and multi-method interfaces take `Handlers`:
+  ```cpp
+  seek.setOnSeekBarChangeListener(stratum::Handlers()
+      .on("onProgressChanged",    [](Object s, int32_t p, bool user) { /* ... */ })
+      .on("onStartTrackingTouch", [](Object s) {})
+      .on("onStopTrackingTouch",  [](Object s) {}));
+  ```
+  A callback's return value is passed back to Java (for example a `bool` from an `onLongClick` handler).
+- **Threads.** Callbacks run on whatever thread Java calls from. Touch views from the UI thread:
+  ```cpp
+  stratum::run_on_ui_thread([label]() { label.setText(JStr("done")); });
+  ```
+- **Exceptions.** A failed Java call throws `stratum::JavaException`. If a C++ exception escapes a callback, it is turned into a Java `RuntimeException`.
+- **Logging.** Compile with `-DSTRATUM_LOG_ENABLED=1` to include tracing; toggle with `stratum::set_log_enabled`.
+
+---
+
+## Calling classes that are not in android.jar
+
+Generated headers only cover classes in `android.jar`. For `androidx.*`, third-party libraries, or your own Java classes, use reflection:
 
 ```cpp
 #include <stratum/reflect.hpp>
 
-// Static method invocation
+// static method
 int32_t status = stratum::reflect::call_static<int32_t>(
-    "androidx.core.content.ContextCompat",
-    "checkSelfPermission",
-    act,
-    std::string("android.permission.CAMERA")
-);
+    "androidx.core.content.ContextCompat", "checkSelfPermission",
+    act, std::string("android.permission.CAMERA"));
 
-// Instantiate arbitrary Java classes
-Object myHelper = stratum::reflect::new_instance("com.example.MyHelper", act, 42);
-
-// Instance method invocation
-stratum::reflect::call_method<void>(myHelper, "doWork", std::string("payload"));
+// constructor, then instance method
+Object helper = stratum::reflect::new_instance("com.example.MyHelper", act, 42);
+stratum::reflect::call_method<void>(helper, "doWork", std::string("payload"));
 ```
+
+Reflection picks a matching overload at runtime, so it is slower and less strict than generated calls. For Java calling into C++ by name, use `stratum::register_function("name", lambda)`, which is reachable from Java as `StratumRuntimeLookup.callStratum("name", args...)`.
 
 ---
 
-## Universal C ABI Reference (`stratum_c_abi.h`)
+## The C ABI
 
-All C++ wrappers evaluate down to the C ABI exported by `libstratum.so`. Any language with C-FFI support can bind directly against this header:
+Everything above reduces to the functions in `20_engine_core/include/stratum_c_abi.h`. Only these are exported; the interface uses integers, pointers and plain structs, so any language that can call C can use it. `STRATUM_ABI_VERSION` is currently `1`.
 
-```c
-// Method Invocation
-int64_t stratum_new_instance(uint32_t cid, uint32_t slot, const StratumArg* a, int32_t* err);
-void    stratum_call_v(int64_t p, uint32_t cid, uint32_t slot, const StratumArg* a, int32_t* err);
-int64_t stratum_call_i(int64_t p, uint32_t cid, uint32_t slot, const StratumArg* a, int32_t* err);
-double  stratum_call_d(int64_t p, uint32_t cid, uint32_t slot, const StratumArg* a, int32_t* err);
-int64_t stratum_call_o(int64_t p, uint32_t cid, uint32_t slot, const StratumArg* a, int32_t* err);
+| Group | Functions (selection) |
+|---|---|
+| Calls | `stratum_new_instance`, `stratum_call_v / _z / _i / _j / _d / _str / _o / _arr / _list` |
+| Fields | `stratum_field_get_*`, `stratum_field_set_*` |
+| References | `stratum_clone_ref`, `stratum_delete_ref`, `stratum_is_instance_of`, `stratum_is_same_object` |
+| Values | `stratum_new_string`, `stratum_box`, `stratum_unbox`, `stratum_new_array`, `stratum_new_object_array`, `stratum_new_list`, `stratum_new_map` |
+| Callbacks | `stratum_register_callback`, `stratum_remove_callback`, `stratum_post_ui` |
+| App | `stratum_get_activity`, `stratum_set_content_view`, `stratum_create_view` |
+| Buffers | `stratum_get_direct_buffer_address`, `stratum_surface_to_native_window` |
+| Reflection | `stratum_reflect_call` |
+| Diagnostics | `stratum_last_error`, `stratum_meta_hash`, `stratum_abi_version` |
 
-// Reference Lifecycle (global ref handles)
-void    stratum_delete_ref(int64_t p);
-int64_t stratum_clone_ref(int64_t p);
+Every function with an `int32_t* err` parameter sets `*err` to `0` on success and `1` on failure. The message is available from `stratum_last_error()`.
 
-// Callbacks & Lifecycle
-void    stratum_register_callback(const char* key, const StratumCbDesc* d);
-void    stratum_remove_callback(const char* key);
-int32_t stratum_post_ui(const StratumCbDesc* d);
-int64_t stratum_get_activity(void);
-
-// Surface & Native Buffers
-void*   stratum_surface_to_native_window(int64_t surface);
-void*   stratum_get_direct_buffer_address(int64_t byte_buffer);
-size_t  stratum_get_direct_buffer_capacity(int64_t byte_buffer);
-```
-
-Every function accepting `int32_t* err` sets `*err = 0` on success and `*err = 1` on failure. The detailed error message can be inspected via `stratum_last_error()`.
+A call needs a `class_id` and `slot`. Those numbers come from the generated metadata for a specific pipeline run, which is why the C++ headers ship together with the matching `libstratum.so`.
 
 ---
 
-## Related Projects
+## Configuration (`pipeline.json`)
 
-- **Stratum (Python / nanobind):**  
-  For running the full pipeline generating CPython / nanobind native extensions for Android:  
-  [https://github.com/a-s-l-a-h/stratum](https://github.com/a-s-l-a-h/stratum)
+Each entry in `jobs` is one Android API level. Everything for a job lives in `build/API_<n>/`.
 
-- **Stratum Android Python 3.14 Demo:**  
-  Working Android Studio project template demonstrating embedded Python runtime integration:  
-  [https://github.com/a-s-l-a-h/stratum_android_py_3_14](https://github.com/a-s-l-a-h/stratum_android_py_3_14)
+| Key | Meaning |
+|---|---|
+| `api_version`, `android_jar_url` | API level and the platform zip to download |
+| `jdk.version`, `jdk.url`, `jdk.path` | JDK to download per OS/arch, or an existing unpacked JDK folder |
+| `api_versions_xml` | `auto` (from the platform zip), `skip`, a URL, or a local path |
+| `hiddenapi_flags` | URL, `skip`, or a local path |
+| `zip_dir`, `zip_name` | Required. Where the final zip goes (`{api}`, `{api_dir}`, `{build_root}` are substituted) |
+| `stages` | Set a stage to `false` to skip it (its input must already exist from an earlier run) |
+| `options.sanitize_strict` | Pass `--strict` to stage 04.5 |
+| `options.min_sdk` | Pass `--min-sdk` to stage 04.5 |
+| `options.closure_mode` | `parents_only`, `parents_and_interfaces` or `full` (stage 05) |
+| `options.abstract_mode` | `on` or `off` (stage 05.5; `off` copies files through unchanged) |
+| `options.emit_prefix` | Comma-separated package prefixes to emit headers for. Empty means everything (large). `android.app.Activity` is always emitted. |
+| `options.targets_file` | Class list used by stage 03 (default `02_inspect/targets.json`) |
+| `options.runtime_min_sdk` | `minSdk` written into `stratum-runtime/build.gradle` (default 24) |
+| `options.runtime_java_version` | Java level written into `stratum-runtime/build.gradle` (`1.8`, `11`, `17`; the shipped config uses `11`) |
+| `extra_args` | Extra command-line arguments per stage id |
 
----
+`compileSdk` in the generated `build.gradle` is set to the job's `api_version`.
 
-
-
-
----
----
----
-## Automated 
-
-1) First clone this  repo 
-2) run this : python run_pipeline_helper.py               # full run for all enabled jobs
-3) wait take some time to compleate 
-4) aftet compleation look inside build/API_35/21_cpp_emit/output/  inside it stratum folder you can copy that and inside that a readme.md there you can refer to how to use this.
-
----
-
-## Coustomize details
-
-configure pipeline.json 
-
-Then run 
-
-python run_pipeline_helper.py --list        # check the config loads, shows jobs and stage toggles
-python run_pipeline_helper.py --dry-run     # prints every command without downloading or running anything
-python run_pipeline_helper.py               # full run for all enabled jobs
-python run_pipeline_helper.py --job 35      # just API 35
+The second job, `android-34`, is present but disabled.
 
 ---
 
----
-### Manual step by step
+## Running stages manually
 
-# Run commands for quick look
+The runner executes the same commands. For reference, for API 35 (from the repo root):
 
-```
-python 00_setup/main.py --jar-path "third_party/android-35.jar" --api-version "35" --javap-path "C:/Program Files/Eclipse Adoptium/jdk-17.0.20.101-hotspot" --jdk-version "17" --api-versions-xml-path "third_party/api_versions/35/api-versions.xml" --hiddenapi-path "third_party/hiddenapi/35/hiddenapi-flags.csv" --output "build/API_35/00_setup"
-```
+<details>
+<summary>Show the commands</summary>
 
-```
-python 01_extract/main.py --setup "build/API_35/00_setup" --output "build/API_35/01_extract"
-```
+```bash
+python 00_setup/main.py --jar-path "third_party/android-35.jar" --api-version "35" \
+  --javap-path "<path to JDK>" --jdk-version "17" \
+  --api-versions-xml-path "third_party/api_versions/35/api-versions.xml" \
+  --hiddenapi-path "third_party/hiddenapi/35/hiddenapi-flags.csv" \
+  --output "build/API_35/00_setup"
 
-```
-python 02_inspect/main.py --input "build/API_35/01_extract" --output "build/API_35/02_inspect"
-```
-
-```
-python 03_javap/main.py --input "build/API_35/01_extract" --targets "02_inspect/targets.json" --setup "build/API_35/00_setup/setup_report.json" --output "build/API_35/03_javap"
-```
-
-```
-python 04_parse/main.py --input "build/API_35/03_javap" --output "build/API_35/04_parse"
-```
-
-```
+python 01_extract/main.py  --setup "build/API_35/00_setup" --output "build/API_35/01_extract"
+python 02_inspect/main.py  --input "build/API_35/01_extract" --output "build/API_35/02_inspect"
+python 03_javap/main.py    --input "build/API_35/01_extract" --targets "02_inspect/targets.json" \
+  --setup "build/API_35/00_setup/setup_report.json" --output "build/API_35/03_javap"
+python 04_parse/main.py    --input "build/API_35/03_javap" --output "build/API_35/04_parse"
 python 04_5_sanitize/main.py --input "build/API_35/04_parse" --output "build/API_35/04_5_sanitize" --strict
-```
-The xml and csv paths come from `build/API_35/00_setup/setup_report.json`, found automatically. Optional extras: `--min-sdk N`, `--setup "build/API_35/00_setup"`.
 
-### Stage 05 (Pass 1)
-```
-python 05_resolve/main.py --input "build/API_35/04_5_sanitize" --output "build/API_35/05_resolve/output"
-```
+python 05_resolve/main.py  --input "build/API_35/04_5_sanitize" --output "build/API_35/05_resolve/output"
+python 05_5_abstract/main.py --input "build/API_35/05_resolve/output" \
+  --output "build/API_35/05_5_abstract/output" --mode on
+python 05_resolve/main.py  --input "build/API_35/05_5_abstract/output/patched" \
+  --output "build/API_35/05_resolve/output_patched"
 
-### Stage 05.5
-```
-python 05_5_abstract/main.py --input "build/API_35/05_resolve/output" --output "build/API_35/05_5_abstract/output" --mode on
-```
-Copy `build/API_35/05_5_abstract/output/java/com/stratum/adapters/*.java` into your Android Studio runtime module.
+python 20_engine_core/emit.py --input "build/API_35/05_resolve/output_patched" \
+  --output "build/API_35/20_engine_core/generated"
+python 21_cpp_emit/main.py --input "build/API_35/05_resolve/output_patched" \
+  --output "build/API_35/21_cpp_emit/output"
 
-refer this to find where to place the adapter java files 
-
-https://github.com/a-s-l-a-h/stratum_android_py_3_14
-
-### Stage 05 (Pass 2)
-```
-python 05_resolve/main.py --input "build/API_35/05_5_abstract/output/patched" --output "build/API_35/05_resolve/output_patched"
+python 21_cpp_emit/package.py --input "build/API_35/21_cpp_emit/output" \
+  --generated "build/API_35/20_engine_core/generated" \
+  --adapters "build/API_35/05_5_abstract/output/java/com/stratum/adapters" \
+  --output "build/API_35/21_cpp_emit/output/stratum" \
+  --api-version 35 --min-sdk 24 --java-version 11
 ```
 
-### Stage 20: engine metadata
-```
-python 20_engine_core/emit.py --input "build/API_35/05_resolve/output_patched" --output "build/API_35/20_engine_core/generated"
-```
+`04_5_sanitize` is optional; without it, point stage 05's first pass at `04_parse` instead. `--api-version` is required for `package.py`. `--emit-prefix "android.app,android.view"` on stage 21 limits which headers are generated.
 
-### Stage 21: C++ SDK headers
-```
-python 21_cpp_emit/main.py --input "build/API_35/05_resolve/output_patched" --output "build/API_35/21_cpp_emit/output"
-```
-Optional: add `--emit-prefix "android.app,android.view"` to emit only some packages.
-
-### Stage 21b: package
-```
-python 21_cpp_emit/package.py --input "build/API_35/21_cpp_emit/output" --generated "build/API_35/20_engine_core/generated" --adapters "build/API_35/05_5_abstract/output/java/com/stratum/adapters" --output "build/API_35/21_cpp_emit/output/stratum" --api-version 35 --min-sdk 24 --java-version 11
-```
-Copy the resulting `stratum/` folder to `app/src/main/cpp/stratum/` in Android Studio and build there.
+</details>
 
 ---
 
-
-
-
-
-
-
-
-
-# Run commands (OLD) for quick look
----
+## Repository layout
 
 ```
-python 00_setup/main.py --jar-path third_party/android-35.jar --api-version 35 --output 00_setup/output
-
-```
----
-
----
-
-```
-python 01_extract/main.py --setup 00_setup/output/setup_report.json --output 01_extract/output
-```
----
-
----
-
-```
-python 02_inspect/main.py --input 01_extract/output --output 02_inspect/output
+stratum-sys/
+├── pipeline.json              job configuration
+├── run_pipeline_helper.py     the runner
+├── 00_setup/ ... 05_resolve/  pipeline stages (each has main.py and a README)
+├── 05_5_abstract/             adapter generator (+ targets.json: seeds, avoid list)
+├── 20_engine_core/            engine sources, C ABI header, emit.py (metadata table)
+├── 21_cpp_emit/               C++ header generator, package.py, templates/
+├── runtime/
+│   ├── stratum-runtime/       Java module sources, manifest, keep rules, build.gradle.template
+│   └── templates/             app CMakeLists.txt, demo native-lib.cpp, SDK_README.md
+├── third_party/               optional api-versions.xml / hiddenapi-flags.csv caches
+└── build/                     generated, per API level
 ```
 
 ---
 
-```
-python 03_javap/main.py --input 01_extract/output --targets 02_inspect/targets.json --setup 00_setup/output/setup_report.json --output 03_javap/output
-```
----
+## Known limitations
+
+These come from reading the code, not from a test report.
+
+- **Parameter limit.** A method with more than 32 parameters is skipped by the C++ emitter and rejected by the engine.
+- **API-level differences.** If a method or class does not exist on the device, the engine logs a warning when the class is first resolved and throws a `JavaException` when the missing method is called. Generated code is based on one `android.jar`, so guard newer APIs with a runtime SDK check.
+- **Hidden APIs.** With the hidden-API list loaded, stage 04.5 removes `blocked` members. Other categories are only removed with `--strict`. Without the list, only private members are removed.
+- **Adapters are selective.** Stage 05.5 generates adapters for classes in its seed list plus abstract classes whose names look like callbacks (`Callback`, `Listener`, `Observer`, `Client`, `Filter`) and that have an accessible constructor. Structural classes (`View`, `Activity`, `Service`, ...) are excluded by design; the runtime module provides `StratumActivity`, `StratumView`, `StratumService` and `StratumReceiver` instead.
+- **Callback lifetime.** A callback's C++ closure is released when its Java listener object is finalized by the garbage collector, not immediately when you drop it.
+- **Typed object returns.** Methods that return objects return `stratum::Object`; cast with `.as<T>()`.
+- **Header volume.** Emitting every class produces a very large header tree. Use `emit_prefix` to limit it.
+- **Not in `android.jar`.** `androidx` and third-party classes get no generated wrapper; use reflection.
+- **Per-call cost.** Each call goes through argument packing, a local reference frame and an exception check. No measurements are published.
 
 ---
 
-```
-python 04_parse/main.py --input 03_javap/output --output 04_parse/output
-```
+## Not done yet
+
+Intentions, not promises:
+
+- Build and publish SDKs for more API levels (the `android-34` job exists but is disabled).
+- Additional language targets on the C ABI. The ABI and the metadata table do not depend on C++, but only the C++ target exists today.
+- Automated builds and release uploads.
+- Distributing `stratum-runtime` as a prebuilt artifact instead of a copied folder.
 
 ---
 
----
+## Related projects
 
-```
-python 04_5_sanitize/main.py --input 04_parse/output --output 04_5_sanitize/output --api-version 35 --strict
-```
----
+- [stratum](https://github.com/a-s-l-a-h/stratum): the Python / nanobind variant of this idea, in a separate repository.
+- [stratum_android_py_3_14](https://github.com/a-s-l-a-h/stratum_android_py_3_14): an Android Studio project for that Python variant.
 
-#### (add --strict to also drop restricted/unsupported/conditional hiddenapi members)
-#### (add --min-sdk N to also drop members removed at/before API N)
-
----
-
-### Stage 05 (Pass 1): Initial Resolution
-### WITH Stage 04.5:
-
----
-
-```
-python 05_resolve/main.py --input 04_5_sanitize/output --output 05_resolve/output
-```
----
-
-### Stage 05.5: Abstract & Interface Adapters Generation 
-
----
-
-```
-python 05_5_abstract/main.py --input 05_resolve/output --output 05_5_abstract/output --mode on
-```
-
----
-
-#### -> Copy 05_5_abstract/output/java/com/stratum/adapters/*.java into Android Studio: runtime module . look the demo project . 
-
---- 
-refer this to find where to place the adapter java files 
-
-https://github.com/a-s-l-a-h/stratum_android_py_3_14
-
----
-
-### Stage 05 (Pass 2): Final Resolution with Patched Callback Metadata 
-
----
-
-```
-python 05_resolve/main.py --input 05_5_abstract/output/patched --output 05_resolve/output_patched
-```
-
----
-
-
----
-
-new c abi target 
-
-
-# 0. shared Java edits (section 2), then upstream exactly as today:
-python 05_resolve/main.py --input 04_parse/output --output 05_resolve/output
-python 05_5_abstract/main.py --input 05_resolve/output --output 05_5_abstract/output --mode on
-python 05_resolve/main.py --input 05_5_abstract/output/patched --output 05_resolve/output_patched
-
-# 1. engine
-python 20_engine_core/emit.py  --input 05_resolve/output_patched
-python 20_engine_core/build.py --abi arm64-v8a            # add --log for deep tracing; repeat for x86_64
-# -> 20_engine_core/output/arm64-v8a/libstratum.so
-
-# 2. SDK (start restricted; drop --emit-prefix later for the whole SDK)
-python 21_cpp_emit/main.py --input 05_resolve/output_patched
-
-python 21_cpp_emit/package.py  # when this run in output folder in stratum there is folder create stratum inside it all c and cpp code for stratum and cmake also there so you can copy and place in the android studio project and build there .
-
----
-
-
-
----
-# stratum embed fully to single .so file it's depending py files all inside to single .so 
-
-### this need same as 00 to 05_5 then 08  ,, and below 10 (10 emit , 10 build) choose static maybe see some perfomance improvment , and also choose --no-log in build when production time
-
-```
-python 08_pyi_emit/main.py --input 05_resolve/output_patched --output 08_pyi_emit/output --mode static 
-
-```
-```
-python 10_embed/emit.py --input 05_resolve/output_patched --static-py 08_pyi_emit/output --setup 00_setup/output/setup_report.json --output 10_embed/output --mode static 
-```
-```
-python 10_embed/build.py --core 10_embed/output/core --setup 00_setup/output/setup_report.json --nanobind third_party/nanobind --abi arm64-v8a --output 10_embed/output --no-log
-``` 
----
-
-
-
----
-
-
-# Project Directory Structure
-```
-stratum/
-├── .gitignore
-├── LICENSE
-├── README.md
-├── PYTHON_API.md
-├── THIRD-PARTY-LICENSES.md
-│
-├── 00_setup/                               # Stage 00: Environment & Tooling Verification
-│   ├── README.md
-│   ├── main.py
-│   └── output/                             # [Generated]
-│       └── setup_report.json               # Environment verification report & paths
-│
-├── 01_extract/                             # Stage 01: Android JAR Extraction
-│   ├── README.md
-│   ├── main.py
-│   └── output/                             # [Generated]
-│       ├── android/                        # Mirrored extracted .class files
-│       │   └── ...
-│       └── extract_summary.json
-│
-├── 02_inspect/                             # Stage 02: Class Inspection & Target Configuration
-│   ├── README.md
-│   ├── main.py
-│   ├── targets.json                        # [Tracked] Pipeline targets & inclusion mode
-│   ├── target_jsons_pool/                  # Preset target configurations
-│   └── output/                             # [Generated]
-│       ├── available_classes.txt           # Flat list of all available Android FQNs
-│       └── available_by_package.txt        # Classes grouped by package hierarchy
-│
-├── 03_javap/                               # Stage 03: Javap Bytecode Extraction
-│   ├── README.md
-│   ├── main.py
-│   └── output/                             # [Generated]
-│       ├── android/                        # Extracted .javap signatures per class
-│       │   └── ...
-│       └── javap_summary.json
-│
-├── 04_parse/                               # Stage 04: Signature & AST Parser
-│   ├── README.md
-│   ├── main.py
-│   └── output/                             # [Generated]
-│       ├── android/                        # Parsed class JSON representations
-│       │   └── ...
-│       └── parse_summary.json
-│
-├── 04_5_sanitize/                          # Stage 04.5: Optional JNI Safety & Hidden API Filter
-│   ├── README.md
-│   ├── main.py
-│   └── output/                             # [Generated]
-│       ├── android/                        # Stripped/sanitized class JSONs
-│       └── sanitize_summary.json
-│
-├── 05_resolve/                             # Stage 05: Slot Assignment & Type Resolution (Pass 1 & Pass 2)
-│   ├── README.md
-│   ├── main.py
-│   ├── targets.json                        # [Tracked] Closure & filter configuration
-│   ├── target_jsons_pool/
-│   ├── output/                             # [Generated - Pass 1] Used by Stage 05.5
-│   │   ├── android/
-│   │   └── resolve_summary.json
-│   └── output_patched/                     # [Generated - Pass 2] Feeds Stage 06 and Stage 08
-│       ├── android/
-│       └── resolve_summary.json
-│
-├── 05_5_abstract/                          # Stage 05.5: Abstract Class & Multi-Method Adapter Generator
-│   ├── README.md
-│   ├── main.py
-│   ├── targets.json                        # [Tracked] Abstract callback seeds & avoid list
-│   └── output/                             # [Generated]
-│       ├── java/
-│       │   └── com/stratum/adapters/       # Generated Java adapter source files (.java)
-│       │       └── Adapter_*.java
-│       ├── patched/                        # Patched JSONs containing adapter metadata
-│       └── manifest.json
-│
-update happen new folders came
-
-
-│
-├── runtime/                                # Runtime Java files (packaged into your Android app)
-│   ├── README.md
-│   └── java/
-│       └── com/stratum/runtime/
-│           ├── StratumActivity.java        # Android Activity managing Python lifecycle
-│           └── StratumInvocationHandler.java # Generic Java Proxy dispatch handler
-│
-└── third_party/                            # External Dependencies & Offline Metadata Caches
-    │
-    │
-    ├── api_versions/                       # [Expected / User Placed - NOT in git]
-    │   └── <api-level>/                    # e.g., 35/
-    │       └── api-versions.xml            # Copy from: <Android-SDK>/platforms/android-<api>/data/api-versions.xml
-    │                                       # (Optional: Used by Stage 04.5 to tag sdk_since/deprecated/removed)
-    │
-    └── hiddenapi/                          # [Expected / User Placed - NOT in git]
-        └── <api-level>/                    # e.g., 35/
-            └── hiddenapi-flags.csv         # Placed manually from AOSP sources
-                                            # (Optional: Used by Stage 04.5 to strip restricted/blocked APIs)
-
-```
----------------------------------------------------
-
+See `LICENSE` and `THIRD-PARTY-LICENSES.md` for licensing.
