@@ -83,7 +83,7 @@ Traditionally, developers must hand-write separate JNI glue code for every nativ
 Stratum uses a fixed-slot dispatch mechanism instead of runtime reflection:
 
 ```
-[ Your Native Code (C++17 / C / Rust) ]
+[ Your Native Code (C++17 ) ]
                   │
                   ▼
    [ Header-Only Typed C++ Wrappers ]
