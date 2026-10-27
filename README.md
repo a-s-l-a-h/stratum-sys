@@ -1,13 +1,14 @@
+# Stratum-Sys
 
-# For python target( nanobind based ) visit this link 
-https://github.com/a-s-l-a-h/stratum
+Stratum-sys is an offline code generation pipeline and lightweight native runtime for Android. It introspects `android.jar`, extracts bytecode signatures, and generates:
 
+1. **A standalone C engine (`libstratum.so`)** exposing a stable, pure C ABI (`stratum_c_abi.h`).
+2. **A header-only C++17 SDK** that wraps Android platform APIs into RAII-managed, type-safe classes.
+3. **An Android library module (`stratum-runtime`)** containing JVM lifecycle hooks and compiled Java adapter classes for abstract callbacks.
 
+Instead of writing custom JNI glue for every native-to-Java interaction, native code calls generated C++ classes (or the underlying C ABI) directly.
 
-# 🌉 Stratum-sys
-
-
-
+---
 
 ## 💡 What Problem Does This Solve?
 
@@ -60,7 +61,7 @@ Traditionally, developers must hand-write separate JNI glue code for every nativ
 ### 3. What Stratum-sys Delivers
 
 * **🛡️ Complete JNI Eradication:**  
-  Never write `JNIEnv*`, `FindClass`, method signatures, or reference management code again. Stratum turns the Android SDK into clean, type-safe C++17 classes:
+  Never write `JNIEnv*`, `FindClass`, method signatures, or manual local-reference management in application logic. Stratum turns the Android SDK into clean, type-safe C++17 classes:
   ```cpp
   // No raw JNI — pure, type-safe C++17
   TextView tv(act);
@@ -69,15 +70,363 @@ Traditionally, developers must hand-write separate JNI glue code for every nativ
   btn.setOnClickListener([]() { toast("Clicked!"); });
   ```
 
-* **⚡ Zero-Copy Native Pipelines:**  
-  Because your hardware access, sensor listeners, and native processing modules all live in the native runtime, data flows between native components via **direct memory pointers**—no copying through the Java heap, no JNI array marshaling, and zero bridge overhead inside tight loops.
+* **⚡ Native Processing Pipelines:**  
+  Hardware access, sensor listeners, compute workloads, and UI event orchestration stay inside the native runtime. Intermediate buffers can flow between native libraries via direct pointers without round-tripping through custom Java bridge classes. Direct memory buffers and `ANativeWindow` handles are supported natively.
 
 * **🔌 Universal, C-Friendly ABI (`stratum_c_abi.h`):**  
-  The engine core compiles into a standalone, pure C ABI library (`libstratum.so`). Because the entire interface is exported via standard C calling conventions, **other programming languages and runtimes (C, C++, Rust, Zig, Go, or custom script engines) can directly integrate with Android** without touching Java or writing custom JNI wrappers.
+  The engine core compiles into a standalone, pure C ABI library (`libstratum.so`). Because the interface is exported via standard C calling conventions, **other programming languages (C, C++, Rust, Zig, Go, or custom runtimes)** can directly call Android APIs without writing custom JNI wrappers.
+
+---
+
+## Technical Architecture
+
+Stratum uses a fixed-slot dispatch mechanism instead of runtime reflection:
+
+```
+[ Your Native Code (C++17 / C / Rust) ]
+                  │
+                  ▼
+   [ Header-Only Typed C++ Wrappers ]
+                  │
+                  ▼
+       [ stratum_c_abi.h ]
+   (stratum_call_v, _z, _i, _j, _d, _str, _o, _arr)
+                  │
+                  ▼
+         [ libstratum.so ]
+   (Lazy Class Resolution + Cached jmethodID Table)
+                  │
+                  ▼
+         [ Android JVM / ART ]
+```
+
+1. **Deterministic Indexing:** The offline pipeline indexes every class (`class_id`) and method (`slot`). Overloads and method pointers are assigned integer slots at generation time.
+2. **String Pool & Metadata Table:** `libstratum.so` embeds an offset-based string table and class metadata array (`g_classes`). Method names and JNI signatures are never parsed at runtime.
+3. **Lazy Resolution:** Classes and `jmethodID` arrays are resolved and cached on first call per class using a thread-safe mutex and double-checked atomic flags.
+4. **Tag-Driven Parameter Marshalling:** Each method carries a compact `param_tags` string (`Z`, `B`, `s`, `[`, `A`, `a`, `p`, etc.). The dispatcher reads the tag and packs arguments directly into JNI `jvalue` arrays with no signature parsing.
+5. **Abstract Class & Interface Adapters:** Dynamic proxies (`java.lang.reflect.Proxy`) cannot subclass abstract classes. Stratum detects abstract callback patterns (`CameraDevice.StateCallback`, `WebViewClient`, `TextWatcher`) and generates concrete Java adapter source files (`Adapter_<fqn>.java`) that route calls back to native handlers via `StratumInvocationHandler.nativeDispatch`.
+
+---
+
+## Requirements
+
+- **Host System:** Linux, macOS, or Windows
+- **Python:** 3.10+
+- **JDK:** Version 17 or 21 (needs `javap` accessible via `PATH` or configured path)
+- **Android Target:** Android SDK platform archive (`android.jar` for the target API level)
+- **Target Project:** Android Studio with NDK and CMake 3.22.1+
+
+---
+
+## Automated Pipeline Setup
+
+The automated pipeline runner (`run_pipeline_helper.py`) downloads the required platform tools and JDKs, extracts bytecode, parses signatures, runs sanitization, and packages the complete SDK.
+
+### 1. Configure Build Targets (`pipeline.json`)
+
+Configure the target API level and file outputs in `pipeline.json`:
+```json
+{
+  "jobs": [
+    {
+      "name": "android-35",
+      "enabled": true,
+      "api_version": "35",
+      "android_jar_url": "https://dl.google.com/android/repository/platform-35_r01.zip",
+      "zip_dir": "{api_dir}/21_cpp_emit/release",
+      "zip_name": "stratum_cpp_android_api_{api}.zip",
+      "api_versions_xml": "auto",
+      "hiddenapi_flags": "skip",
+      "options": {
+        "sanitize_strict": true,
+        "abstract_mode": "on",
+        "runtime_min_sdk": 24,
+        "runtime_java_version": "11"
+      }
+    }
+  ]
+}
+```
+
+### 2. Run the Pipeline
+
+Inspect configuration and stages:
+```bash
+python run_pipeline_helper.py --list
+```
+
+Dry-run to verify commands and target directories without execution:
+```bash
+python run_pipeline_helper.py --dry-run
+```
+
+Execute the full build pipeline for an API:
+```bash
+python run_pipeline_helper.py --job 35
+```
+
+Partial execution options:
+```bash
+# Run only specific stages (by prefix)
+python run_pipeline_helper.py --only 20,21
+
+# Resume pipeline starting from a specific stage
+python run_pipeline_helper.py --from 04_5_sanitize
+```
+
+### 3. Generated SDK Layout
+
+When the pipeline finishes, the packaged SDK is located at:
+```
+build/API_<version>/21_cpp_emit/output/stratum/
+├── README.md
+├── cpp/
+│   ├── CMakeLists.txt
+│   ├── native-lib.cpp
+│   └── stratum/              # libstratum.so sources, CMakeLists.txt, include/
+└── stratum-runtime/          # Android Library module (.aar format)
+    ├── build.gradle
+    ├── consumer-rules.pro
+    └── src/main/java/com/stratum/{runtime,adapters}/
+```
+
+---
+
+## Integrating into an Android Studio Project
+
+### 1. Copy Files into the App Project
+From `build/API_<version>/21_cpp_emit/output/stratum/`:
+1. Copy the `stratum-runtime` folder into your Android project root (next to `app/`).
+2. Copy the `cpp/stratum` directory into your native code directory: `app/src/main/cpp/stratum/`.
+
+### 2. Update Gradle Configuration
+In your project-level `settings.gradle`:
+```groovy
+include ':app'
+include ':stratum-runtime'
+```
+
+In your application module `app/build.gradle`:
+```groovy
+android {
+    defaultConfig {
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17"
+            }
+        }
+    }
+}
+
+dependencies {
+    implementation project(':stratum-runtime')
+}
+```
+
+### 3. Configure CMake
+In `app/src/main/cpp/CMakeLists.txt`:
+```cmake
+cmake_minimum_required(VERSION 3.22.1)
+project(myapp CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Compiles libstratum.so and exports PUBLIC headers
+add_subdirectory(stratum)
+
+add_library(myapp SHARED native-lib.cpp)
+
+find_library(log-lib log)
+target_link_libraries(myapp PRIVATE stratum ${log-lib})
+```
+
+### 4. Wire the Activity
+In `MainActivity.java`:
+```java
+package com.example.myapp;
+
+import com.stratum.runtime.StratumActivity;
+
+public class MainActivity extends StratumActivity {
+    @Override
+    protected boolean onImportMain() {
+        // Loads your application native library after libstratum is loaded
+        System.loadLibrary("myapp");
+        return true;
+    }
+}
+```
+
+---
+
+## C++ SDK Guide
+
+### 1. Lifecycle Entry Point
+Define `onCreate` in the global namespace in your native library. Stratum auto-wires lifecycle calls via weak symbols:
+
+```cpp
+#include <stratum/stratum.hpp>
+#include <stratum/android/widget/LinearLayout.hpp>
+#include <stratum/android/widget/TextView.hpp>
+#include <stratum/android/widget/Button.hpp>
+#include <stratum/android/widget/Toast.hpp>
+
+using stratum::Activity;
+using stratum::JStr;
+using stratum::Object;
+using stratum::android::widget::LinearLayout;
+using stratum::android::widget::TextView;
+using stratum::android::widget::Button;
+using stratum::android::widget::Toast;
+
+static inline int32_t C(uint32_t c) { return static_cast<int32_t>(c); }
+
+void onCreate(Activity act) {
+    LinearLayout root(act);
+    root.setOrientation(LinearLayout::VERTICAL);
+    root.setPadding(32, 48, 32, 32);
+
+    TextView label(act);
+    label.setText(JStr("Hello from Stratum Native C++"));
+    label.setTextSize(22.0f);
+    label.setTextColor(C(0xFFFFFFFF));
+    root.addView(label);
+
+    Button btn(act);
+    btn.setText(JStr("Show Toast"));
+    btn.setOnClickListener([act]() {
+        Toast::makeText(act, JStr("Clicked from C++"), Toast::LENGTH_SHORT)
+             .unchecked_as<Toast>()
+             .show();
+    });
+    root.addView(btn);
+
+    stratum::setContentView(act, root);
+}
+```
+
+### 2. Core Operational Rules
+
+1. **Default Constructing an Object produces a `NULL` reference:**  
+   `Paint p;` is null. Calling methods on it throws `JavaException`. To construct a no-arg Java object, call its static `create()` method:
+   ```cpp
+   Paint p = Paint::create(); // calls new Paint()
+   ```
+2. **Object Returns are Untyped (`stratum::Object`):**  
+   Cast to specific wrappers using `.as<T>()` (checked via JNI `IsInstanceOf`) or `.unchecked_as<T>()`:
+   ```cpp
+   SensorManager sm = act.getSystemService("sensor").as<SensorManager>();
+   ```
+3. **Strings:**  
+   - Inputs accept `stratum::JStr` (implicitly constructed from `"literals"`, `std::string`, `std::string_view`, or `nullptr`).
+   - String/CharSequence returns are returned as `std::string`.
+4. **Single vs. Multi-Method Callbacks:**  
+   - Single-method listeners accept a plain lambda:
+     ```cpp
+     btn.setOnClickListener([]() { ... });
+     ```
+   - Multi-method listeners or abstract classes use `stratum::Handlers`:
+     ```cpp
+     seek.setOnSeekBarChangeListener(stratum::Handlers()
+         .on("onProgressChanged", [](Object s, int32_t p, bool user) { ... })
+         .on("onStartTrackingTouch", [](Object s) {})
+         .on("onStopTrackingTouch",  [](Object s) {}));
+     ```
+5. **Background Threads:**  
+   Calls that mutate UI views must be posted to the main thread:
+   ```cpp
+   stratum::run_on_ui_thread([label, text]() {
+       label.setText(JStr(text));
+   });
+   ```
+6. **Exception Safety in Callbacks:**  
+   Exceptions escaping C++ callbacks become Java runtime exceptions. Wrap internal callback logic in `try / catch`:
+   ```cpp
+   btn.setOnClickListener([]() {
+       try {
+           // operations
+       } catch (const std::exception& e) {
+           __android_log_print(ANDROID_LOG_ERROR, "App", "%s", e.what());
+       }
+   });
+   ```
+
+---
+
+## Dynamic Reflection (`stratum/reflect.hpp`)
+
+Stratum's generated headers cover platform classes found in `android.jar`. For classes outside `android.jar` (e.g., `androidx.*`, third-party libraries, or your own app-specific Java classes), use `stratum::reflect`:
+
+```cpp
+#include <stratum/reflect.hpp>
+
+// Static method invocation
+int32_t status = stratum::reflect::call_static<int32_t>(
+    "androidx.core.content.ContextCompat",
+    "checkSelfPermission",
+    act,
+    std::string("android.permission.CAMERA")
+);
+
+// Instantiate arbitrary Java classes
+Object myHelper = stratum::reflect::new_instance("com.example.MyHelper", act, 42);
+
+// Instance method invocation
+stratum::reflect::call_method<void>(myHelper, "doWork", std::string("payload"));
+```
+
+---
+
+## Universal C ABI Reference (`stratum_c_abi.h`)
+
+All C++ wrappers evaluate down to the C ABI exported by `libstratum.so`. Any language with C-FFI support can bind directly against this header:
+
+```c
+// Method Invocation
+int64_t stratum_new_instance(uint32_t cid, uint32_t slot, const StratumArg* a, int32_t* err);
+void    stratum_call_v(int64_t p, uint32_t cid, uint32_t slot, const StratumArg* a, int32_t* err);
+int64_t stratum_call_i(int64_t p, uint32_t cid, uint32_t slot, const StratumArg* a, int32_t* err);
+double  stratum_call_d(int64_t p, uint32_t cid, uint32_t slot, const StratumArg* a, int32_t* err);
+int64_t stratum_call_o(int64_t p, uint32_t cid, uint32_t slot, const StratumArg* a, int32_t* err);
+
+// Reference Lifecycle (global ref handles)
+void    stratum_delete_ref(int64_t p);
+int64_t stratum_clone_ref(int64_t p);
+
+// Callbacks & Lifecycle
+void    stratum_register_callback(const char* key, const StratumCbDesc* d);
+void    stratum_remove_callback(const char* key);
+int32_t stratum_post_ui(const StratumCbDesc* d);
+int64_t stratum_get_activity(void);
+
+// Surface & Native Buffers
+void*   stratum_surface_to_native_window(int64_t surface);
+void*   stratum_get_direct_buffer_address(int64_t byte_buffer);
+size_t  stratum_get_direct_buffer_capacity(int64_t byte_buffer);
+```
+
+Every function accepting `int32_t* err` sets `*err = 0` on success and `*err = 1` on failure. The detailed error message can be inspected via `stratum_last_error()`.
+
+---
+
+## Related Projects
+
+- **Stratum (Python / nanobind):**  
+  For running the full pipeline generating CPython / nanobind native extensions for Android:  
+  [https://github.com/a-s-l-a-h/stratum](https://github.com/a-s-l-a-h/stratum)
+
+- **Stratum Android Python 3.14 Demo:**  
+  Working Android Studio project template demonstrating embedded Python runtime integration:  
+  [https://github.com/a-s-l-a-h/stratum_android_py_3_14](https://github.com/a-s-l-a-h/stratum_android_py_3_14)
+
+---
 
 
 
 
+---
+---
 ---
 ## Automated 
 
