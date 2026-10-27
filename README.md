@@ -1,18 +1,94 @@
 
-> This repo in development so This repository is undergoing frequent changes.
-> This repo on based on stratum . but in this repo stratum to focus on c target and cpp target insted of python .
-<div align="center">
-
-
-
 # For python target( nanobind based ) visit this link 
-
 https://github.com/a-s-l-a-h/stratum
+
+
 
 # 🌉 Stratum-sys
 
+
+
+
+## 💡 What Problem Does This Solve?
+
+### 1. The "N-Bridge Hell" of Android Native Development
+When building high-performance Android applications containing multiple native engines (compute, physics, signal processing, audio, or custom core logic), traditional development forces you into a fragmented architecture:
+* Every native library requires its own manual JNI bridge or cumbersome Java wrapper to talk to the Java UI.
+* Buffers and data arrays are repeatedly copied back and forth across the JNI boundary between the Java and native heaps, increasing latency and draining battery.
+* Developers waste hundreds of hours maintaining raw JNI boilerplate (`FindClass`, `GetMethodID`, signature strings like `"([BII)V"`), managing local/global references, and debugging memory synchronization issues.
+
+```text
+          ┌────────────────────────────────────────┐
+          │        Android UI / App (Java)         │
+          └───┬────────────────┬───────────────┬───┘
+              │ (JNI Bridge 1) │ (JNI Bridge 2)│ (JNI Bridge 3)
+              ▼                ▼               ▼
+      ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+      │ Native Lib A │ │ Native Lib B │ │ Native Lib C │
+      │   (C / C++)  │ │   (C / C++)  │ │   (C / C++)  │
+      └──────────────┘ └──────────────┘ └──────────────┘
+```
+
 ---
-### Automated 
+
+### 2. The Solution: The "Inverted Bridge" Architecture
+Traditionally, developers must hand-write separate JNI glue code for every native library to expose it to Java.
+
+**Stratum-sys inverts this model:** instead of bridging each native library up to Java, Stratum automatically wraps the entire Android platform (`android.jar`) into native headers. You get **one universal, auto-generated bridge**, allowing your native code to control Android directly without writing a single line of raw JNI:
+
+```text
+            ┌────────────────────────────────────────┐
+            │        Android OS (Platform/Sensors)   │
+            └───────────────────▲────────────────────┘
+                                │ (Single Stratum Bridge)
+    ════════════════════════════╪═════════════════════════════
+    THE NATIVE ENGINE           │
+                                ▼
+       ┌──────────────────────────────────────────────────┐
+       │ Hardware / Sensor Buffer (Native)                │
+       │                         │ (Direct memory pointer)│
+       │                         ▼                        │
+       │                     Native Processing (C / C++)  │
+       │                         │ (Direct memory pointer)│
+       │                         ▼                        │
+       │                     Custom Core Engine (C / C++) │
+       └──────────────────────────────────────────────────┘
+```
+
+---
+
+### 3. What Stratum-sys Delivers
+
+* **🛡️ Complete JNI Eradication:**  
+  Never write `JNIEnv*`, `FindClass`, method signatures, or reference management code again. Stratum turns the Android SDK into clean, type-safe C++17 classes:
+  ```cpp
+  // No raw JNI — pure, type-safe C++17
+  TextView tv(act);
+  tv.setText("Hello from Native C++");
+  tv.setTextSize(24.0f);
+  btn.setOnClickListener([]() { toast("Clicked!"); });
+  ```
+
+* **⚡ Zero-Copy Native Pipelines:**  
+  Because your hardware access, sensor listeners, and native processing modules all live in the native runtime, data flows between native components via **direct memory pointers**—no copying through the Java heap, no JNI array marshaling, and zero bridge overhead inside tight loops.
+
+* **🔌 Universal, C-Friendly ABI (`stratum_c_abi.h`):**  
+  The engine core compiles into a standalone, pure C ABI library (`libstratum.so`). Because the entire interface is exported via standard C calling conventions, **other programming languages and runtimes (C, C++, Rust, Zig, Go, or custom script engines) can directly integrate with Android** without touching Java or writing custom JNI wrappers.
+
+
+
+
+---
+## Automated 
+
+1) First clone this  repo 
+2) run this : python run_pipeline_helper.py               # full run for all enabled jobs
+3) wait take some time to compleate 
+4) aftet compleation look inside build/API_35/21_cpp_emit/output/  inside it stratum folder you can copy that and inside that a readme.md there you can refer to how to use this.
+
+---
+
+## Coustomize details
 
 configure pipeline.json 
 
