@@ -536,6 +536,6 @@ Intentions, not promises:
 - **[Stratum C++ Demo — v0_01 Release](https://github.com/a-s-l-a-h/stratumcppdemo/releases/tag/v0_01-tag)** — Download the ready-to-build Android Studio project, including the generated Stratum engine and C++ headers. No generator setup is needed.
 - **[stratum-rust](https://github.com/a-s-l-a-h/stratum-rust)** — Rust target/binding for Stratum, extending the project toward Rust.
 - [stratum](https://github.com/a-s-l-a-h/stratum): the Python / nanobind variant of this idea, in a separate repository.
-- [stratum_android_py_3_14](https://github.com/a-s-l-a-h/stratum_android_py_3_14): an Android Studio project for that Python variant.
+
 
 See `LICENSE` and `THIRD-PARTY-LICENSES.md` for licensing.
